@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { jsPDF } from 'jspdf'
 import { clearSession, readSession, saveSession, validateLogin } from './auth'
-import { firebaseEnabled, saveContractToFirestore } from './firebase'
+import { firebaseEnabled, findClientByDocument, saveContractToFirestore } from './firebase'
 import { parseAmount, roundAmount } from './money.js'
 import loginBackground from './assets/login-background.jpg'
 import './App.css'
@@ -48,6 +48,9 @@ function App() {
   const [view, setView] = useState<'home' | 'form' | 'review' | 'history'>('home')
   const [step, setStep] = useState(1)
   const [form, setForm] = useState<ContractForm>(emptyContract)
+  const clientLookupSequence = useRef(0)
+  const autoFilledClient = useRef<{ document: string; tenant: string; address: string; phone: string } | null>(null)
+  const [clientLookupStatus, setClientLookupStatus] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle')
   const [activeContractNumber, setActiveContractNumber] = useState(() => Number(localStorage.getItem('sastreria-next-contract-number') || '1'))
   const [contractNumber, setContractNumber] = useState(() => Number(localStorage.getItem('sastreria-next-contract-number') || '1'))
   const [contracts, setContracts] = useState<Contract[]>(() => {
@@ -55,6 +58,47 @@ function App() {
   })
 
   const update = <K extends keyof ContractForm>(field: K, value: ContractForm[K]) => setForm((current) => ({ ...current, [field]: value }))
+  const updateDocument = (value: string) => {
+    clientLookupSequence.current += 1
+    const previousClient = autoFilledClient.current
+    autoFilledClient.current = null
+    setClientLookupStatus('idle')
+    setForm((current) => ({
+      ...current,
+      document: value,
+      tenant: previousClient?.document === current.document.trim() && current.tenant === previousClient.tenant ? '' : current.tenant,
+      address: previousClient?.document === current.document.trim() && current.address === previousClient.address ? '' : current.address,
+      phone: previousClient?.document === current.document.trim() && current.phone === previousClient.phone ? '' : current.phone,
+    }))
+  }
+  const lookupClient = async () => {
+    const document = form.document.trim()
+    if (!document || !firebaseEnabled) return
+
+    const request = ++clientLookupSequence.current
+    const currentValues = { tenant: form.tenant, address: form.address, phone: form.phone }
+    setClientLookupStatus('loading')
+
+    try {
+      const client = await findClientByDocument(document)
+      if (request !== clientLookupSequence.current) return
+      if (!client) {
+        setClientLookupStatus('not-found')
+        return
+      }
+
+      autoFilledClient.current = { document, tenant: client.name, address: client.address, phone: client.phone }
+      setForm((current) => request !== clientLookupSequence.current ? current : ({
+        ...current,
+        tenant: current.tenant === currentValues.tenant ? client.name : current.tenant,
+        address: current.address === currentValues.address ? client.address : current.address,
+        phone: current.phone === currentValues.phone ? client.phone : current.phone,
+      }))
+      setClientLookupStatus('found')
+    } catch {
+      if (request === clientLookupSequence.current) setClientLookupStatus('error')
+    }
+  }
   const toggleArticle = (article: string) => {
     const selected = form.articles.includes(article)
     update('articles', selected ? form.articles.filter((item) => item !== article) : [...form.articles, article])
@@ -67,7 +111,7 @@ function App() {
     update('articlePrices', { ...(form.articlePrices || {}), [article]: '' })
     setNewArticle('')
   }
-  const startNew = () => { setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); setView('form') }
+  const startNew = () => { clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); setView('form') }
   const saveContract = async () => {
     setSaveError('')
     setIsSaving(true)
@@ -282,7 +326,20 @@ function App() {
       {view === 'home' && <><section className="hero-section"><div><p className="eyebrow">GESTIÓN DE ALQUILERES / 01</p><h1>Contratos</h1><p className="hero-copy">Crea contratos profesionales para cada traje, guarda tu historial y trabaja desde cualquier lugar.</p><button className="primary-button" onClick={startNew}>＋ Crear nuevo contrato <span>↗</span></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section><section className="home-grid"><button className="feature-link" onClick={() => setView('history')}><span><b>02</b><strong>Contratos guardados</strong><small>Consulta y revisa tu archivo</small></span><span className="link-arrow">↗</span></button><div className="feature-note"><span className="tiny-rule" /><p>Todos tus documentos permanecen guardados en este dispositivo. No necesitas internet.</p></div></section></>}
 
       {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO No. {String(contractNumber).padStart(4, '0')} / PASO 0{step}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => setView('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else setView('review') }}><div className="field-grid">
-        {step === 1 && <><label>Nombre completo<input required value={form.tenant} onChange={(e) => update('tenant', e.target.value)} placeholder="Ej. Juan Pérez" /></label><label>DNI / documento<input required value={form.document} onChange={(e) => update('document', e.target.value)} placeholder="CC / Pasaporte" /></label><label>Dirección de residencia<input required value={form.address} onChange={(e) => update('address', e.target.value)} placeholder="Calle, número, ciudad" /></label><label>Número de teléfono<input required value={form.phone} onChange={(e) => update('phone', e.target.value)} placeholder="+57 300 000 0000" /></label><label>Inicio del contrato<input required type="date" value={form.startDate} onChange={(e) => update('startDate', e.target.value)} /></label><label>Fin del contrato<input required type="date" value={form.endDate} onChange={(e) => update('endDate', e.target.value)} /></label></>}
+        {step === 1 && <>
+          <label>CI<input required aria-label="CI" value={form.document} onChange={(event) => updateDocument(event.target.value)} onBlur={() => void lookupClient()} placeholder="Ingrese CI" autoComplete="off" />
+            {!firebaseEnabled && <small>La búsqueda de clientes requiere Firebase. Puedes completar los datos manualmente.</small>}
+            {clientLookupStatus === 'loading' && <small role="status">Buscando cliente...</small>}
+            {clientLookupStatus === 'found' && <small role="status">Cliente encontrado. Datos completados.</small>}
+            {clientLookupStatus === 'not-found' && <small role="status">No se encontró un cliente con ese CI.</small>}
+            {clientLookupStatus === 'error' && <small role="alert">No se pudo consultar el cliente. Verifica la conexión y los permisos de Firebase.</small>}
+          </label>
+          <label>Nombre completo<input required value={form.tenant} onChange={(event) => update('tenant', event.target.value)} placeholder="Ej. Juan Pérez" /></label>
+          <label>Número de teléfono<input required value={form.phone} onChange={(event) => update('phone', event.target.value)} placeholder="+57 300 000 0000" /></label>
+          <label>Dirección de residencia<input required value={form.address} onChange={(event) => update('address', event.target.value)} placeholder="Calle, número, ciudad" /></label>
+          <label>Inicio del contrato<input required type="date" value={form.startDate} onChange={(event) => update('startDate', event.target.value)} /></label>
+          <label>Fin del contrato<input required type="date" value={form.endDate} onChange={(event) => update('endDate', event.target.value)} /></label>
+        </>}
         {step === 2 && <><fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{form.articles.includes(article) ? '✓' : '+'}</span>{article}</label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>✓</span>{article}</label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset><div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div><label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label><label>Talla<input required value={form.size} onChange={(e) => update('size', e.target.value)} placeholder="Ej. 40R" /></label><label>Color<input required value={form.color} onChange={(e) => update('color', e.target.value)} placeholder="Ej. Negro carbón" /></label><label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label><label className="wide">Observaciones del estado<textarea value={form.notes} onChange={(e) => update('notes', e.target.value)} placeholder="Accesorios incluidos, detalles o condiciones..." /></label></>}
         {step === 3 && <><label className="toggle wide"><input type="checkbox" checked={form.promissoryNote} onChange={(e) => update('promissoryNote', e.target.checked)} /><span className="checkmark">✓</span><span><b>Incluir pagaré automático</b><small>Se generará por {money(promissoryValue)} (5 × {money(totalAmount)}).</small></span></label><label className="wide">Restricciones y condiciones<textarea value={form.restrictions} onChange={(e) => update('restrictions', e.target.value)} placeholder="Ej. Entregar limpio y sin modificaciones..." /></label></>}
       </div><div className="form-actions">{step > 1 && <button type="button" className="secondary-button" onClick={() => setStep(step - 1)}>← Atrás</button>}<button type="submit" className="primary-button">{step < 3 ? 'Continuar' : 'Revisar contrato'} <span>↗</span></button></div></form></div></section>}
