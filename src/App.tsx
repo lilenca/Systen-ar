@@ -112,7 +112,7 @@ function App() {
     setNewArticle('')
   }
   const startNew = () => { clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); setView('form') }
-  const saveContract = async () => {
+  const saveContract = async (keepReview = false): Promise<Contract | null> => {
     setSaveError('')
     setIsSaving(true)
     const contract: Contract = { ...form, totalValue: String(totalAmount), contractNumber: activeContractNumber, id: crypto.randomUUID(), createdAt: new Date().toISOString() }
@@ -123,17 +123,20 @@ function App() {
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : 'No se pudo guardar en Firebase.')
       setIsSaving(false)
-      return
+      return null
     }
 
     const next = [savedContract, ...contracts]
     setContracts(next)
     setContractNumber(savedContract.contractNumber + 1)
-    setActiveContractNumber(savedContract.contractNumber + 1)
     localStorage.setItem('sastreria-contracts', JSON.stringify(next))
     localStorage.setItem('sastreria-next-contract-number', String(savedContract.contractNumber + 1))
-    setView('history')
+    setForm(savedContract)
+    setPrintedContractNumber(savedContract.contractNumber)
+    setActiveContractNumber(savedContract.contractNumber + 1)
+    setView(keepReview ? 'review' : 'history')
     setIsSaving(false)
+    return savedContract
   }
   const formatContractNumber = (value: number) => `002 - N° ${String(value).padStart(7, '0')}`
   const formatDate = (date: string) => date ? new Intl.DateTimeFormat('es-PY', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(`${date}T12:00:00`)) : 'Sin definir'
@@ -162,9 +165,25 @@ function App() {
     const currentNumber = reservePrintedNumber()
     setForm((current) => current.contractNumber ? current : { ...current, contractNumber: currentNumber })
   }, [view, form.contractNumber, printedContractNumber])
-  const downloadPdf = () => {
+  const printContract = async () => {
+    if ('id' in form && form.id) {
+      window.print()
+      return
+    }
+    const savedContract = await saveContract(true)
+    if (savedContract) setTimeout(() => window.print(), 0)
+  }
+  const downloadSavedPdf = async () => {
+    if ('id' in form && form.id) {
+      downloadPdf()
+      return
+    }
+    const savedContract = await saveContract(true)
+    if (savedContract) downloadPdf(savedContract)
+  }
+  const downloadPdf = (savedContract?: Contract) => {
     const pdf = new jsPDF({ format: 'a4', unit: 'mm' })
-    const contractId = reservePrintedNumber()
+    const contractId = savedContract?.contractNumber || reservePrintedNumber()
     const number = formatContractNumber(contractId)
     const pageWidth = 210
     const margin = 10
@@ -344,7 +363,7 @@ function App() {
         {step === 3 && <><label className="toggle wide"><input type="checkbox" checked={form.promissoryNote} onChange={(e) => update('promissoryNote', e.target.checked)} /><span className="checkmark">✓</span><span><b>Incluir pagaré automático</b><small>Se generará por {money(promissoryValue)} (5 × {money(totalAmount)}).</small></span></label><label className="wide">Restricciones y condiciones<textarea value={form.restrictions} onChange={(e) => update('restrictions', e.target.value)} placeholder="Ej. Entregar limpio y sin modificaciones..." /></label></>}
       </div><div className="form-actions">{step > 1 && <button type="button" className="secondary-button" onClick={() => setStep(step - 1)}>← Atrás</button>}<button type="submit" className="primary-button">{step < 3 ? 'Continuar' : 'Revisar contrato'} <span>↗</span></button></div></form></div></section>}
 
-      {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => window.print()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={downloadPdf}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={saveContract}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
+      {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
 
       {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{contracts.map((contract, index) => <button className="history-row" key={contract.id} onClick={() => { setForm(contract); setView('review') }}><span className="row-number">{String(contract.contractNumber || index + 1).padStart(4, '0')}</span><span><strong>{contract.tenant}</strong><small>{contract.suit} · {money(contract.totalValue)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button>)}</div>}</section>}
     </main><footer><span>SASTRERÍA CONTROL © 2026</span><span>DOCUMENTOS LOCALES · PRIVADOS</span></footer>
