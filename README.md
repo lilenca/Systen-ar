@@ -17,6 +17,16 @@ VITE_FIREBASE_APP_ID=
 
 Estas variables se leen desde `src/firebase.ts` y deben estar disponibles en el entorno del cliente (`VITE_*`).
 
+## Acceso de administrador
+
+El acceso se valida con Firebase Authentication; no hay credenciales de administrador incluidas en el código del sitio.
+
+1. En Firebase Console, abre **Authentication → Sign-in method** y habilita **Email/Password**.
+2. En **Authentication → Users**, crea la cuenta administradora con su correo y una contraseña nueva.
+3. Despliega de nuevo la aplicación. En el login se usa ese correo y contraseña.
+
+No reutilices la contraseña local que se usaba antes; al estar publicada en el código debe considerarse comprometida.
+
 ## Despliegue en Vercel
 
 1. Conecta el repositorio a un proyecto de Vercel.

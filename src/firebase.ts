@@ -1,4 +1,5 @@
 import { getApps, initializeApp } from 'firebase/app'
+import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut as firebaseSignOut, type Unsubscribe } from 'firebase/auth'
 import { collection, doc, getDoc, getDocs, getFirestore, query, runTransaction, setDoc, where, writeBatch } from 'firebase/firestore'
 import { parseAmount } from './money.js'
 import { getSaleDescription, getSaleTotal, type SaleRecord } from './sales.js'
@@ -18,7 +19,34 @@ export const firebaseEnabled = hasFirebaseConfig
 export const firebaseApp = hasFirebaseConfig
   ? (getApps()[0] || initializeApp(firebaseConfig))
   : null
+export const firebaseAuth = firebaseApp ? getAuth(firebaseApp) : null
 export const firestore = firebaseApp ? getFirestore(firebaseApp) : null
+
+export function observeAuthentication(
+  onChange: (authenticated: boolean) => void,
+  onError: (error: Error) => void,
+): Unsubscribe {
+  if (!firebaseAuth) {
+    onChange(false)
+    return () => undefined
+  }
+
+  return onAuthStateChanged(
+    firebaseAuth,
+    (user) => onChange(Boolean(user)),
+    onError,
+  )
+}
+
+export async function signIn(email: string, password: string): Promise<void> {
+  if (!firebaseAuth) throw new Error('Firebase no está configurado. Contacta al administrador.')
+  await signInWithEmailAndPassword(firebaseAuth, email, password)
+}
+
+export async function signOut(): Promise<void> {
+  if (!firebaseAuth) throw new Error('Firebase no está configurado. Contacta al administrador.')
+  await firebaseSignOut(firebaseAuth)
+}
 
 export type CashWithdrawal = {
   id: string

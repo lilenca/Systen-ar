@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { clearSession, readSession, saveSession, validateLogin } from './auth'
-import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, type CashWithdrawal, type DailyCashSession } from './firebase'
+import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, observeAuthentication, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, signIn, signOut, type CashWithdrawal, type DailyCashSession } from './firebase'
 import { filterContracts, summarizeContracts } from './contractInsights.js'
 import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleDescription, paymentMethods, type SaleProduct } from './sales.js'
 import { formatGuaraniDifference, parseAmount, roundAmount } from './money.js'
@@ -96,8 +95,10 @@ function formatDateTime24(value?: string) {
 }
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => !new URLSearchParams(window.location.search).has('login') && readSession())
-  const [login, setLogin] = useState({ username: '', password: '' })
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isAuthLoading, setIsAuthLoading] = useState(true)
+  const [isLoggingIn, setIsLoggingIn] = useState(false)
+  const [login, setLogin] = useState({ email: '', password: '' })
   const [loginError, setLoginError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [cashError, setCashError] = useState('')
@@ -151,6 +152,18 @@ function App() {
     const interval = window.setInterval(() => setCashDateKey(getLocalDateKey()), 60_000)
     return () => window.clearInterval(interval)
   }, [])
+
+  useEffect(() => observeAuthentication(
+    (authenticated) => {
+      setIsAuthenticated(authenticated)
+      setIsAuthLoading(false)
+    },
+    (error) => {
+      setIsAuthenticated(false)
+      setIsAuthLoading(false)
+      setLoginError(error.message)
+    },
+  ), [])
 
   useEffect(() => {
     if (!isAuthenticated) return
@@ -951,22 +964,34 @@ function App() {
     pdf.save(`contrato-${String(contractId).padStart(7, '0')}.pdf`)
   }
 
-  const handleLogin = (event: FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-
-    if (!login.username.trim() || !login.password.trim()) {
-      setLoginError('Debes ingresar usuario y contraseña.')
-      return
+    setIsLoggingIn(true)
+    setLoginError('')
+    try {
+      await signIn(login.email.trim(), login.password)
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
+      if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
+        setLoginError('Correo o contraseña incorrectos.')
+      } else if (code === 'auth/too-many-requests') {
+        setLoginError('Demasiados intentos. Espera un momento y vuelve a intentar.')
+      } else if (code === 'auth/operation-not-allowed') {
+        setLoginError('El acceso por correo y contraseña no está habilitado en Firebase.')
+      } else {
+        setLoginError(error instanceof Error ? error.message : 'No se pudo iniciar sesión. Verifica tu conexión e inténtalo de nuevo.')
+      }
+    } finally {
+      setIsLoggingIn(false)
     }
+  }
 
-    if (validateLogin(login)) {
-      saveSession()
-      setIsAuthenticated(true)
-      setLoginError('')
-      return
+  const handleLogout = async () => {
+    try {
+      await signOut()
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'No se pudo cerrar la sesión.')
     }
-
-    setLoginError('Usuario o contraseña incorrectos.')
   }
 
   const focusNextFieldOnEnter = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -987,10 +1012,11 @@ function App() {
     nextField.focus()
   }
 
-  if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa para gestionar contratos y documentos locales.</p><form onSubmit={handleLogin} className="login-form"><label>Usuario<input autoFocus required value={login.username} onChange={(event) => setLogin({ ...login, username: event.target.value })} placeholder="admin" /></label><label>Contraseña<input required type="password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error">{loginError}</p>}<button className="primary-button" type="submit">Entrar al sistema <span>↗</span></button></form><small className="login-hint">Sesión guardada solo en este dispositivo.</small></div></div>
+  if (isAuthLoading) return <div className="login-screen" role="status" aria-live="polite"><div className="login-panel"><p>Verificando sesión segura...</p></div></div>
+  if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa con tu cuenta administradora para gestionar contratos y documentos.</p><form onSubmit={(event) => void handleLogin(event)} className="login-form"><label>Correo electrónico<input autoFocus required type="email" autoComplete="username" value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} placeholder="admin@ejemplo.com" /></label><label>Contraseña<input required type="password" autoComplete="current-password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error" role="alert">{loginError}</p>}<button className="primary-button" type="submit" disabled={isLoggingIn || !firebaseEnabled}>{isLoggingIn ? 'Ingresando...' : 'Entrar al sistema'} <span>↗</span></button>{!firebaseEnabled && <p className="login-error" role="alert">Firebase no está configurado. No es posible iniciar sesión.</p>}</form><small className="login-hint">Autenticación segura administrada por Firebase.</small></div></div>
 
   return <div className="app-shell" onKeyDown={focusNextFieldOnEnter}>
-    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></header>
+    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></header>
     <main className={isPageLoading ? 'page-shell is-loading' : 'page-shell'}>
       {isPageLoading && <div className="page-loader" role="status" aria-live="polite" aria-busy="true" aria-label="Cargando"><span className="page-loader-spinner" aria-hidden="true" /></div>}
       {view === 'home' && <>
@@ -1083,7 +1109,7 @@ function App() {
       {view === 'form' && step === 2 && <section className="workspace payment-method-section"><div className="cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div></section>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
-        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
+        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
       </section></div>}
       {isClosingCashDialogOpen && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="close-cash-title">
         <p className="eyebrow">CIERRE DE CAJA / {dateLabel.toUpperCase()}</p><h2 id="close-cash-title">Cuenta el efectivo</h2>
