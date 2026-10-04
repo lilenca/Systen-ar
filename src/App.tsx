@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { jsPDF } from 'jspdf'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { clearSession, readSession, saveSession, validateLogin } from './auth'
-import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, openDailyCashSession, saveContractToFirestore, saveSaleToFirestore, type DailyCashSession } from './firebase'
+import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, type CashWithdrawal, type DailyCashSession } from './firebase'
 import { filterContracts, summarizeContracts } from './contractInsights.js'
-import { buildCashCloseSummary, buildCashReconciliation, buildSalesSummary, defaultProducts, getLocalDateKey, paymentMethods, type SaleProduct } from './sales.js'
-import { parseAmount, roundAmount } from './money.js'
+import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleDescription, paymentMethods, type SaleProduct } from './sales.js'
+import { formatGuaraniDifference, parseAmount, roundAmount } from './money.js'
 import loginBackground from './assets/login-background.jpg'
 import './App.css'
 
@@ -33,16 +32,27 @@ type Contract = {
 }
 
 type ContractForm = Omit<Contract, 'id' | 'contractNumber' | 'createdAt'> & { contractNumber?: number }
+type SaleLineItem = {
+  id: string
+  productId: string
+  productName: string
+  quantity: number
+  unitPrice: number
+}
 type Sale = {
   id: string
   productId: string
   productName: string
   quantity: number
   unitPrice: number
+  totalAmount?: number
+  items?: SaleLineItem[]
   soldAt: string
   cashSessionId?: string
   customerDocument: string
   customer: string
+  customerPhone?: string
+  customerAddress?: string
   paymentMethod: string
   receiptNumber: string
 }
@@ -52,6 +62,8 @@ type SaleForm = {
   unitPrice: string
   customerDocument: string
   customer: string
+  customerPhone: string
+  customerAddress: string
   paymentMethod: string
 }
 
@@ -69,7 +81,7 @@ const emptyContract: ContractForm = {
   articles: [], articlePrices: {}, suit: '', size: '', color: '', totalValue: '', depositValue: '', notes: '',
   depositPaymentMethod: 'Efectivo', promissoryNote: true, restrictions: '',
 }
-const saleDefaultForm: SaleForm = { productId: defaultProducts[0]?.id || '', quantity: 1, unitPrice: String(defaultProducts[0]?.price || 0), customerDocument: '', customer: '', paymentMethod: 'Efectivo' }
+const saleDefaultForm: SaleForm = { productId: defaultProducts[0]?.id || '', quantity: 1, unitPrice: String(defaultProducts[0]?.price || 0), customerDocument: '', customer: '', customerPhone: '', customerAddress: '', paymentMethod: 'Efectivo' }
 
 function formatTime24(value?: string) {
   if (!value) return '--:--'
@@ -89,24 +101,32 @@ function App() {
   const [loginError, setLoginError] = useState('')
   const [saveError, setSaveError] = useState('')
   const [cashError, setCashError] = useState('')
+  const [withdrawalError, setWithdrawalError] = useState('')
   const [isSavingSale, setIsSavingSale] = useState(false)
+  const [saleSuccess, setSaleSuccess] = useState('')
   const [saleClientLookupStatus, setSaleClientLookupStatus] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle')
   const [cashDateKey, setCashDateKey] = useState(() => getLocalDateKey())
   const [dailyCashSession, setDailyCashSession] = useState<DailyCashSession | null>(null)
   const [cashSessionStatus, setCashSessionStatus] = useState<'checking' | 'missing' | 'open' | 'closed' | 'error'>('checking')
   const [openingBalanceInput, setOpeningBalanceInput] = useState('')
   const [closingCashInput, setClosingCashInput] = useState('')
+  const [cashWithdrawalAmount, setCashWithdrawalAmount] = useState('')
+  const [cashWithdrawalReason, setCashWithdrawalReason] = useState('')
   const [isOpeningCash, setIsOpeningCash] = useState(false)
   const [isClosingCash, setIsClosingCash] = useState(false)
   const [isClosingCashDialogOpen, setIsClosingCashDialogOpen] = useState(false)
+  const [isCashWithdrawalDialogOpen, setIsCashWithdrawalDialogOpen] = useState(false)
+  const [isSavingCashWithdrawal, setIsSavingCashWithdrawal] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [newArticle, setNewArticle] = useState('')
   const [printedContractNumber, setPrintedContractNumber] = useState<number | null>(null)
-  const [view, setView] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'clients'>('home')
+  const [view, setViewState] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'sales' | 'clients'>('home')
+  const [isPageLoading, setIsPageLoading] = useState(false)
   const [step, setStep] = useState(1)
   const [form, setForm] = useState<ContractForm>(emptyContract)
   const clientLookupSequence = useRef(0)
   const saleClientLookupSequence = useRef(0)
+  const saleSubmissionLock = useRef(false)
   const autoFilledClient = useRef<{ document: string; tenant: string; address: string; phone: string } | null>(null)
   const [clientLookupStatus, setClientLookupStatus] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle')
   const [activeContractNumber, setActiveContractNumber] = useState(() => Number(localStorage.getItem('sastreria-next-contract-number') || '1'))
@@ -124,6 +144,8 @@ function App() {
     try { return JSON.parse(localStorage.getItem('sastreria-sales') || '[]') } catch { return [] }
   })
   const [saleForm, setSaleForm] = useState<SaleForm>(saleDefaultForm)
+  const [saleCart, setSaleCart] = useState<SaleLineItem[]>([])
+  const saleCartTotal = saleCart.reduce((total, item) => total + item.quantity * item.unitPrice, 0)
 
   useEffect(() => {
     const interval = window.setInterval(() => setCashDateKey(getLocalDateKey()), 60_000)
@@ -148,7 +170,7 @@ function App() {
   }, [isAuthenticated, cashDateKey])
 
   useEffect(() => {
-    if (!firebaseEnabled) return
+    if (!isAuthenticated || !firebaseEnabled) return
     let cancelled = false
     void loadBusinessData(products, sales, contracts).then((data) => {
       if (cancelled) return
@@ -162,36 +184,62 @@ function App() {
       if (!cancelled) setCashError(error instanceof Error ? error.message : 'No se pudieron cargar los datos de Firebase.')
     })
     return () => { cancelled = true }
-  }, [])
+  }, [isAuthenticated])
 
-  const contractSummary = summarizeContracts(contracts)
-  const filteredContracts = filterContracts(contracts, searchTerm)
-  const clientsByDocument = new Map<string, RegisteredClient>()
-  const addRegisteredClient = (client: Partial<RegisteredClient>) => {
-    const document = String(client.document || '').trim()
-    if (!document) return
-    const previous = clientsByDocument.get(document)
-    clientsByDocument.set(document, {
-      ...previous,
-      ...client,
-      document,
-      name: client.name?.trim() || previous?.name || 'Cliente sin nombre',
-      phone: client.phone || previous?.phone || '',
-      address: client.address || previous?.address || '',
-    })
-  }
-  firebaseClients.forEach(addRegisteredClient)
-  contracts.forEach((contract) => addRegisteredClient({ document: contract.document, name: contract.tenant, phone: contract.phone, address: contract.address, updatedAt: contract.createdAt }))
-  sales.forEach((sale) => addRegisteredClient({ document: sale.customerDocument, name: sale.customer, updatedAt: sale.soldAt }))
-  const registeredClients = [...clientsByDocument.values()].sort((first, second) => first.name.localeCompare(second.name, 'es'))
+  const contractSummary = useMemo(() => summarizeContracts(contracts), [contracts])
+  const filteredContracts = useMemo(() => filterContracts(contracts, searchTerm), [contracts, searchTerm])
+
+  const registeredClients = useMemo(() => {
+    const clientsByDocument = new Map<string, RegisteredClient>()
+    const addRegisteredClient = (client: Partial<RegisteredClient>) => {
+      const document = String(client.document || '').trim()
+      if (!document) return
+      const previous = clientsByDocument.get(document)
+      clientsByDocument.set(document, {
+        ...previous,
+        ...client,
+        document,
+        name: client.name?.trim() || previous?.name || 'Cliente sin nombre',
+        phone: client.phone || previous?.phone || '',
+        address: client.address || previous?.address || '',
+      })
+    }
+
+    firebaseClients.forEach(addRegisteredClient)
+    contracts.forEach((contract) => addRegisteredClient({ document: contract.document, name: contract.tenant, phone: contract.phone, address: contract.address, updatedAt: contract.createdAt }))
+    sales.forEach((sale) => addRegisteredClient({ document: sale.customerDocument, name: sale.customer, phone: sale.customerPhone, address: sale.customerAddress, updatedAt: sale.soldAt }))
+
+    return [...clientsByDocument.values()].sort((first, second) => first.name.localeCompare(second.name, 'es'))
+  }, [firebaseClients, contracts, sales])
+
   const normalizedClientSearch = clientSearchTerm.trim().toLocaleLowerCase('es')
-  const filteredClients = registeredClients.filter((client) => `${client.name} ${client.document} ${client.phone || ''} ${client.address || ''}`.toLocaleLowerCase('es').includes(normalizedClientSearch))
-  const salesSummary = buildSalesSummary(sales, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber)
-  const cashReconciliation = buildCashReconciliation(sales, contracts, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber)
-  const todaySales = sales.filter((sale) => getLocalDateKey(sale.soldAt) === cashDateKey && (!dailyCashSession?.id || sale.cashSessionId === dailyCashSession.id || (!sale.cashSessionId && dailyCashSession.sessionNumber === 1)))
-  const cashCloseSummary = buildCashCloseSummary(dailyCashSession?.openingBalance || 0, cashReconciliation.totalsByMethod.Efectivo, parseAmount(closingCashInput))
+  const filteredClients = useMemo(() => registeredClients.filter((client) => `${client.name} ${client.document} ${client.phone || ''} ${client.address || ''}`.toLocaleLowerCase('es').includes(normalizedClientSearch)), [registeredClients, normalizedClientSearch])
+  const cashReconciliation = useMemo(() => buildCashReconciliation(sales, contracts, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber), [sales, contracts, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber])
+  const cashWithdrawals = dailyCashSession?.withdrawals || []
+  const totalCashWithdrawals = useMemo(() => cashWithdrawals.reduce((total, withdrawal) => total + Number(withdrawal.amount || 0), 0), [cashWithdrawals])
+  const cashCloseSummary = buildCashCloseSummary(dailyCashSession?.openingBalance || 0, cashReconciliation.totalsByMethod.Efectivo, parseAmount(closingCashInput), totalCashWithdrawals)
   const expectedCash = cashCloseSummary.expectedCash
+  const cashAvailableForWithdrawal = Math.max(0, (dailyCashSession?.openingBalance || 0) + cashReconciliation.totalsByMethod.Efectivo - totalCashWithdrawals)
   const dateLabel = new Intl.DateTimeFormat('es-PY', { day: '2-digit', month: 'long', year: 'numeric' }).format(new Date(`${cashDateKey}T12:00:00`))
+
+  const navigationTimer = useRef<number | null>(null)
+
+  const navigateTo = (nextView: typeof view) => {
+    if (nextView === view || isPageLoading) return
+    if (navigationTimer.current) window.clearTimeout(navigationTimer.current)
+    setIsPageLoading(true)
+    navigationTimer.current = window.setTimeout(() => {
+      setViewState(nextView)
+      setIsPageLoading(false)
+    }, 200)
+  }
+  const setView = navigateTo
+
+  useEffect(() => {
+    return () => {
+      if (navigationTimer.current) window.clearTimeout(navigationTimer.current)
+    }
+  }, [])
 
   const update = <K extends keyof ContractForm>(field: K, value: ContractForm[K]) => setForm((current) => ({ ...current, [field]: value }))
   const updateDocument = (value: string) => {
@@ -238,12 +286,18 @@ function App() {
   const lookupSaleClient = async () => {
     const document = saleForm.customerDocument.trim()
     if (!document) return
+    const request = ++saleClientLookupSequence.current
     if (!firebaseEnabled) {
-      setSaleClientLookupStatus('error')
+      const client = registeredClients.find((item) => item.document === document)
+      if (!client) {
+        setSaleClientLookupStatus('not-found')
+        return
+      }
+      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name, customerPhone: client.phone || '', customerAddress: client.address || '' } : current)
+      setSaleClientLookupStatus('found')
       return
     }
 
-    const request = ++saleClientLookupSequence.current
     setSaleClientLookupStatus('loading')
     try {
       const client = await findClientByDocument(document)
@@ -252,7 +306,7 @@ function App() {
         setSaleClientLookupStatus('not-found')
         return
       }
-      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name } : current)
+      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name, customerPhone: client.phone, customerAddress: client.address } : current)
       setSaleClientLookupStatus('found')
     } catch {
       if (request === saleClientLookupSequence.current) setSaleClientLookupStatus('error')
@@ -273,7 +327,46 @@ function App() {
       setIsOpeningCash(false)
     }
   }
-  const downloadCashReport = (session: DailyCashSession) => {
+  const handleCashWithdrawalSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!dailyCashSession || cashSessionStatus !== 'open') return
+    const amount = parseAmount(cashWithdrawalAmount)
+    const reason = cashWithdrawalReason.trim()
+    if (amount <= 0) {
+      setWithdrawalError('Ingresa un monto mayor a cero.')
+      return
+    }
+    if (!reason) {
+      setWithdrawalError('Escribe el motivo del retiro.')
+      return
+    }
+    if (amount > cashAvailableForWithdrawal) {
+      setWithdrawalError(`El retiro supera el efectivo disponible (${guarani(cashAvailableForWithdrawal)}).`)
+      return
+    }
+
+    setWithdrawalError('')
+    setIsSavingCashWithdrawal(true)
+    const withdrawal: CashWithdrawal = {
+      id: crypto.randomUUID(),
+      amount,
+      reason,
+      withdrawnAt: new Date().toISOString(),
+    }
+    try {
+      const session = await recordCashWithdrawal(dailyCashSession, withdrawal)
+      setDailyCashSession(session)
+      setCashWithdrawalAmount('')
+      setCashWithdrawalReason('')
+      setIsCashWithdrawalDialogOpen(false)
+    } catch (error) {
+      setWithdrawalError(error instanceof Error ? error.message : 'No se pudo registrar el retiro.')
+    } finally {
+      setIsSavingCashWithdrawal(false)
+    }
+  }
+  const downloadCashReport = async (session: DailyCashSession) => {
+    const { jsPDF } = await import('jspdf')
     const pdf = new jsPDF({ format: 'a4', unit: 'mm' })
     const left = 14
     const right = 196
@@ -316,8 +409,9 @@ function App() {
       pdf.setFontSize(7.5)
       pdf.text('HORA', left + 3, top + 5.8)
       pdf.text('CLIENTE / CI', left + 22, top + 5.8)
-      pdf.text('CONCEPTO / REFERENCIA', left + 72, top + 5.8)
-      pdf.text('PAGO', left + 132, top + 5.8)
+      pdf.text('TIPO', left + 55, top + 5.8)
+      pdf.text('CONCEPTO / REF.', left + 78, top + 5.8)
+      pdf.text('PAGO', left + 119, top + 5.8)
       pdf.text('IMPORTE', right - 3, top + 5.8, { align: 'right' })
       pdf.setTextColor(...ink)
     }
@@ -331,11 +425,12 @@ function App() {
     const summaryCards = [
       ['FONDO INICIAL', guarani(session.openingBalance)],
       ['INGRESOS DEL DÍA', guarani(cashReconciliation.totalAmount)],
+      ['RETIROS DE CAJA', guarani(session.totalCashWithdrawals ?? (session.withdrawals || []).reduce((total, withdrawal) => total + Number(withdrawal.amount || 0), 0))],
       ['EFECTIVO ESPERADO', guarani(session.expectedCash || 0)],
       ['EFECTIVO CONTADO', guarani(session.countedCash || 0)],
     ]
     const cardGap = 3
-    const cardWidth = (width - cardGap * 3) / 4
+    const cardWidth = (width - cardGap * (summaryCards.length - 1)) / summaryCards.length
     summaryCards.forEach(([label, value], index) => {
       const x = left + index * (cardWidth + cardGap)
       pdf.setFillColor(247, 243, 235)
@@ -358,7 +453,7 @@ function App() {
     pdf.setTextColor(...muted)
     pdf.text('DIFERENCIA DE EFECTIVO', left + 4, 89.5)
     pdf.setTextColor(...ink)
-    pdf.text(guarani(session.cashDifference || 0), right - 4, 89.5, { align: 'right' })
+    pdf.text(formatGuaraniDifference(session.cashDifference || 0), right - 4, 89.5, { align: 'right' })
 
     pdf.setFont('helvetica', 'bold')
     pdf.setFontSize(9)
@@ -397,13 +492,14 @@ function App() {
 
     cashReconciliation.entries.forEach((entry, index) => {
       const time = formatTime24(entry.paidAt)
-      const customerLines = pdf.splitTextToSize(entry.customer || 'Venta directa', 44)
-      const documentLines = pdf.splitTextToSize(`CI ${entry.customerDocument || 'N/D'}`, 44)
-      const conceptLines = pdf.splitTextToSize(entry.concept || 'Movimiento', 53)
-      const referenceLines = pdf.splitTextToSize(entry.reference || 'Sin referencia', 53)
-      const methodLines = pdf.splitTextToSize(entry.paymentMethod, 28)
+      const customerLines = pdf.splitTextToSize(entry.customer || 'Venta directa', 31)
+      const documentLines = pdf.splitTextToSize(`CI ${entry.customerDocument || 'N/D'}`, 31)
+      const typeLines = pdf.splitTextToSize(entry.movementType || 'MOVIMIENTO', 18)
+      const conceptLines = pdf.splitTextToSize(entry.concept || 'Movimiento', 36)
+      const referenceLines = pdf.splitTextToSize(entry.reference || 'Sin referencia', 36)
+      const methodLines = pdf.splitTextToSize(entry.paymentMethod, 24)
       const detailLines = [...conceptLines, ...referenceLines]
-      const contentLines = Math.max(customerLines.length + documentLines.length, detailLines.length, methodLines.length, 1)
+      const contentLines = Math.max(customerLines.length + documentLines.length, typeLines.length, detailLines.length, methodLines.length, 1)
       const rowHeight = Math.max(12, contentLines * 3.5 + 5)
 
       if (y + rowHeight > 278) {
@@ -432,20 +528,65 @@ function App() {
       pdf.setTextColor(...muted)
       pdf.setFontSize(7)
       pdf.text(documentLines, left + 22, y + 1 + customerLines.length * 3.5)
+      pdf.setFont('helvetica', 'bold')
+      pdf.setTextColor(...gold)
+      pdf.setFontSize(7)
+      pdf.text(typeLines, left + 55, y + 1)
       pdf.setTextColor(...ink)
       pdf.setFontSize(7.5)
-      pdf.text(conceptLines, left + 72, y + 1)
+      pdf.text(conceptLines, left + 78, y + 1)
       pdf.setTextColor(...muted)
       pdf.setFontSize(7)
-      pdf.text(referenceLines, left + 72, y + 1 + conceptLines.length * 3.5)
+      pdf.text(referenceLines, left + 78, y + 1 + conceptLines.length * 3.5)
       pdf.setTextColor(...ink)
       pdf.setFontSize(7)
-      pdf.text(methodLines, left + 132, y + 1)
+      pdf.text(methodLines, left + 119, y + 1)
       pdf.setFont('helvetica', 'bold')
       pdf.setFontSize(8)
       pdf.text(guarani(entry.amount), right - 3, y + 2, { align: 'right' })
       y += rowHeight
     })
+
+    const withdrawals = session.withdrawals || []
+    if (withdrawals.length > 0) {
+      if (y + 14 > 278) {
+        pdf.addPage()
+        drawBrandHeader(true)
+        y = 56
+      }
+      pdf.setFont('helvetica', 'bold')
+      pdf.setFontSize(10)
+      pdf.setTextColor(...ink)
+      pdf.text('RETIROS DE CAJA', left, y + 8)
+      y += 15
+
+      withdrawals.forEach((withdrawal, index) => {
+        const reasonLines = pdf.splitTextToSize(withdrawal.reason, width - 54)
+        const rowHeight = Math.max(11, reasonLines.length * 3.5 + 5)
+        if (y + rowHeight > 278) {
+          pdf.addPage()
+          drawBrandHeader(true)
+          pdf.setFont('helvetica', 'bold')
+          pdf.setFontSize(9)
+          pdf.setTextColor(...ink)
+          pdf.text('RETIROS DE CAJA · CONTINUACIÓN', left, 56)
+          y = 64
+        }
+
+        pdf.setFillColor(index % 2 === 0 ? 250 : 255, index % 2 === 0 ? 248 : 255, index % 2 === 0 ? 244 : 255)
+        pdf.rect(left, y - 4, width, rowHeight, 'F')
+        pdf.setFont('helvetica', 'normal')
+        pdf.setFontSize(7)
+        pdf.setTextColor(...muted)
+        pdf.text(formatTime24(withdrawal.withdrawnAt), left + 3, y + 2)
+        pdf.setTextColor(...ink)
+        pdf.text(reasonLines, left + 25, y + 1)
+        pdf.setFont('helvetica', 'bold')
+        pdf.setFontSize(8)
+        pdf.text(`-${guarani(withdrawal.amount)}`, right - 3, y + 2, { align: 'right' })
+        y += rowHeight
+      })
+    }
 
     const pageCount = pdf.getNumberOfPages()
     for (let page = 1; page <= pageCount; page += 1) {
@@ -473,6 +614,7 @@ function App() {
       cashDifference: cashCloseSummary.cashDifference,
       totalsByMethod: cashReconciliation.totalsByMethod,
       totalIncome: cashReconciliation.totalAmount,
+      totalCashWithdrawals,
     }
     try {
       const session = await closeDailyCashSession(dailyCashSession, sessionData)
@@ -480,7 +622,7 @@ function App() {
       setCashSessionStatus('closed')
       setIsClosingCashDialogOpen(false)
       setClosingCashInput('')
-      downloadCashReport(session)
+      void downloadCashReport(session).catch(() => setCashError('La caja se cerró, pero no se pudo descargar el PDF.'))
     } catch (error) {
       setCashError(error instanceof Error ? error.message : 'No se pudo cerrar la caja.')
     } finally {
@@ -499,7 +641,7 @@ function App() {
     update('articlePrices', { ...(form.articlePrices || {}), [article]: '' })
     setNewArticle('')
   }
-  const startNew = () => { clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); setView('form') }
+  const startNew = () => { clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); navigateTo('form') }
   const saveContract = async (keepReview = false): Promise<Contract | null> => {
     setSaveError('')
     if (cashSessionStatus !== 'open') {
@@ -526,7 +668,7 @@ function App() {
     setForm(savedContract)
     setPrintedContractNumber(savedContract.contractNumber)
     setActiveContractNumber(savedContract.contractNumber + 1)
-    setView(keepReview ? 'review' : 'history')
+    navigateTo(keepReview ? 'review' : 'history')
     setIsSaving(false)
     return savedContract
   }
@@ -537,7 +679,7 @@ function App() {
     return `GS. ${amount.toLocaleString('es-PY', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
   }
   const money = (value: string | number) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(parseAmount(value))
-  const formatGsInput = (value: string | number) => parseAmount(value).toLocaleString('es-PY', { maximumFractionDigits: 0 })
+  const formatGsInput = (value: string | number) => String(value ?? '').trim() ? parseAmount(value).toLocaleString('es-PY', { maximumFractionDigits: 0 }) : ''
   const calculatedTotal = form.articles.reduce((sum, article) => sum + parseAmount(form.articlePrices?.[article] || 0), 0)
   const totalAmount = roundAmount(calculatedTotal || parseAmount(form.totalValue))
   const promissoryValue = roundAmount(totalAmount * 5)
@@ -558,6 +700,10 @@ function App() {
     const currentNumber = reservePrintedNumber()
     setForm((current) => current.contractNumber ? current : { ...current, contractNumber: currentNumber })
   }, [view, form.contractNumber, printedContractNumber])
+
+  useEffect(() => () => {
+    if (navigationTimer.current) window.clearTimeout(navigationTimer.current)
+  }, [])
   const printContract = async () => {
     if ('id' in form && form.id) {
       window.print()
@@ -574,32 +720,61 @@ function App() {
     if ('id' in form && form.id === id) {
       setForm(emptyContract)
       setPrintedContractNumber(null)
-      setView('history')
+      navigateTo('history')
     }
   }
+  const addSaleItem = () => {
+    const product = products.find((item) => item.id === saleForm.productId)
+    const quantity = Number(saleForm.quantity || 0)
+    const unitPrice = parseAmount(saleForm.unitPrice)
+    if (!product || quantity <= 0 || unitPrice <= 0) {
+      setCashError('Selecciona un producto con cantidad y precio válidos.')
+      return
+    }
+
+    setSaleCart((current) => [...current, {
+      id: crypto.randomUUID(),
+      productId: product.id,
+      productName: product.name,
+      quantity,
+      unitPrice,
+    }])
+    setSaleForm((current) => ({ ...current, quantity: 1 }))
+    setCashError('')
+    setSaleSuccess('')
+  }
+  const removeSaleItem = (id: string) => setSaleCart((current) => current.filter((item) => item.id !== id))
   const handleSaleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (saleSubmissionLock.current) return
+    setSaleSuccess('')
     setCashError('')
     if (!dailyCashSession || cashSessionStatus !== 'open') {
       setCashError('Abre la caja del día antes de registrar ventas.')
       return
     }
 
-    const selectedProduct = products.find((product) => product.id === saleForm.productId)
-    const quantity = Number(saleForm.quantity || 0)
-    const unitPrice = parseAmount(saleForm.unitPrice)
-    if (!selectedProduct || quantity <= 0 || unitPrice <= 0) return
+    if (saleCart.length === 0) {
+      setCashError('Agrega al menos un producto antes de guardar la venta.')
+      return
+    }
+    saleSubmissionLock.current = true
+    const totalAmount = saleCartTotal
 
     let sale: Sale = {
       id: crypto.randomUUID(),
-      productId: selectedProduct.id,
-      productName: selectedProduct.name,
-      quantity,
-      unitPrice,
+      productId: saleCart[0].productId,
+      productName: getSaleDescription({ items: saleCart }),
+      quantity: 1,
+      unitPrice: totalAmount,
+      totalAmount,
+      items: saleCart,
       soldAt: new Date().toISOString(),
       cashSessionId: dailyCashSession.id,
       customerDocument: saleForm.customerDocument.trim(),
       customer: saleForm.customer.trim() || 'Venta directa',
+      customerPhone: saleForm.customerPhone.trim(),
+      customerAddress: saleForm.customerAddress.trim(),
       paymentMethod: saleForm.paymentMethod,
       receiptNumber: `REC-${String(sales.length + 1).padStart(7, '0')}`,
     }
@@ -613,22 +788,28 @@ function App() {
       const nextSales = [sale, ...sales]
       setSales(nextSales)
       localStorage.setItem('sastreria-sales', JSON.stringify(nextSales))
-      setSaleForm({ ...saleDefaultForm, productId: selectedProduct.id, unitPrice: String(selectedProduct.price) })
+      setSaleCart([])
+      setSaleForm(saleDefaultForm)
+      saleClientLookupSequence.current += 1
+      setSaleClientLookupStatus('idle')
+      setSaleSuccess('Venta guardada. El cliente quedó registrado en el directorio.')
     } catch (error) {
       setCashError(error instanceof Error ? error.message : 'No se pudo guardar la venta.')
     } finally {
+      saleSubmissionLock.current = false
       setIsSavingSale(false)
     }
   }
   const downloadSavedPdf = async () => {
     if ('id' in form && form.id) {
-      downloadPdf()
+      await downloadPdf()
       return
     }
     const savedContract = await saveContract(true)
-    if (savedContract) downloadPdf(savedContract)
+    if (savedContract) await downloadPdf(savedContract)
   }
-  const downloadPdf = (savedContract?: Contract) => {
+  const downloadPdf = async (savedContract?: Contract) => {
+    const { jsPDF } = await import('jspdf')
     const pdf = new jsPDF({ format: 'a4', unit: 'mm' })
     const contractId = savedContract?.contractNumber || reservePrintedNumber()
     const number = formatContractNumber(contractId)
@@ -788,15 +969,51 @@ function App() {
     setLoginError('Usuario o contraseña incorrectos.')
   }
 
-  if (!isAuthenticated) return <div className="login-screen"><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa para gestionar contratos y documentos locales.</p><form onSubmit={handleLogin} className="login-form"><label>Usuario<input autoFocus required value={login.username} onChange={(event) => setLogin({ ...login, username: event.target.value })} placeholder="admin" /></label><label>Contraseña<input required type="password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error">{loginError}</p>}<button className="primary-button" type="submit">Entrar al sistema <span>↗</span></button></form><small className="login-hint">Sesión guardada solo en este dispositivo.</small></div></div>
+  const focusNextFieldOnEnter = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
+    const target = event.target
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return
+    if (target instanceof HTMLInputElement && ['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'hidden', 'image'].includes(target.type)) return
 
-  return <div className="app-shell">
-    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => setView('home')}><span className="brand-mark">S</span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /> {firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</div><button className="header-nav-button" onClick={() => setView('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => setView('home')}>Inicio</button>}<button className="logout-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></header>
-    <main>
-      {view === 'home' && <><section className="hero-section"><div><p className="eyebrow">GESTIÓN DE ALQUILERES / 01</p><h1>Contratos</h1><p className="hero-copy">Crea contratos profesionales para cada traje, guarda tu historial y trabaja desde cualquier lugar.</p><button className="primary-button" onClick={startNew}>＋ Crear nuevo contrato <span>↗</span></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section><section className="stats-grid"><div className="stat-card"><span>Contratos</span><strong>{contractSummary.totalContracts}</strong></div><div className="stat-card"><span>Ingresos</span><strong>{money(contractSummary.totalRevenue)}</strong></div><div className="stat-card"><span>Ticket promedio</span><strong>{money(contractSummary.averageTicket)}</strong></div><div className="stat-card"><span>Último registro</span><strong>{contractSummary.latestContractDate ? formatDateTime24(contractSummary.latestContractDate) : 'Sin datos'}</strong></div></section><section className="home-grid"><button className="feature-link" onClick={() => setView('history')}><span><b>02</b><strong>Contratos guardados</strong><small>Consulta y revisa tu archivo</small></span><span className="link-arrow">↗</span></button><button className="feature-link" onClick={() => setView('cash')}><span><b>03</b><strong>Caja y ventas</strong><small>Stock, ventas del día y control</small></span><span className="link-arrow">↗</span></button><div className="feature-note"><span className="tiny-rule" /><p>Todos tus documentos permanecen guardados en este dispositivo. No necesitas internet.</p></div></section></>}
-      {view === 'home' && <><section className="hero-section"><div><p className="eyebrow">GESTIÓN DE ALQUILERES / 01</p><h1>Contratos</h1><p className="hero-copy">Crea contratos profesionales para cada traje, guarda tu historial y trabaja desde cualquier lugar.</p><button className="primary-button" onClick={startNew}>＋ Crear nuevo contrato <span>↗</span></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section><section className="stats-grid"><div className="stat-card"><span>Contratos</span><strong>{contractSummary.totalContracts}</strong></div><div className="stat-card"><span>Ingresos</span><strong>{money(contractSummary.totalRevenue)}</strong></div><div className="stat-card"><span>Ticket promedio</span><strong>{money(contractSummary.averageTicket)}</strong></div><div className="stat-card"><span>Último registro</span><strong>{contractSummary.latestContractDate ? formatDateTime24(contractSummary.latestContractDate) : 'Sin datos'}</strong></div></section><section className="home-grid"><button className="feature-link" onClick={() => setView('history')}><span><b>02</b><strong>Contratos guardados</strong><small>Consulta y revisa tu archivo</small></span><span className="link-arrow">↗</span></button><button className="feature-link" onClick={() => setView('cash')}><span><b>03</b><strong>Caja y ventas</strong><small>Stock, ventas del día y control</small></span><span className="link-arrow">↗</span></button><div className="feature-note"><span className="tiny-rule" /><p>Todos tus documentos permanecen guardados en este dispositivo. No necesitas internet.</p></div></section></>}
+    const form = target.form
+    if (!form) return
+    const fields = Array.from(form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>(
+      'input:not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([disabled]), select:not([disabled]), button[type="submit"]:not([disabled])',
+    )).filter((field) => field.getClientRects().length > 0)
+    const nextField = fields[fields.indexOf(target) + 1]
+    if (!nextField) return
 
-      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO No. {String(contractNumber).padStart(4, '0')} / PASO 0{step}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => setView('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else setView('review') }}><div className="field-grid">
+    event.preventDefault()
+    nextField.focus()
+  }
+
+  if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa para gestionar contratos y documentos locales.</p><form onSubmit={handleLogin} className="login-form"><label>Usuario<input autoFocus required value={login.username} onChange={(event) => setLogin({ ...login, username: event.target.value })} placeholder="admin" /></label><label>Contraseña<input required type="password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error">{loginError}</p>}<button className="primary-button" type="submit">Entrar al sistema <span>↗</span></button></form><small className="login-hint">Sesión guardada solo en este dispositivo.</small></div></div>
+
+  return <div className="app-shell" onKeyDown={focusNextFieldOnEnter}>
+    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></header>
+    <main className={isPageLoading ? 'page-shell is-loading' : 'page-shell'}>
+      {isPageLoading && <div className="page-loader" role="status" aria-live="polite" aria-busy="true" aria-label="Cargando"><span className="page-loader-spinner" aria-hidden="true" /></div>}
+      {view === 'home' && <>
+        <section className="home-toolbar" aria-label="Acciones rápidas">
+          <div className="home-toolbar-actions">
+            <button className="primary-button" onClick={startNew}>＋ Nuevo contrato</button>
+            <button className="secondary-button" onClick={() => navigateTo('sales')}>＋ Nueva venta</button>
+          </div>
+          <div className="home-cash-stack">
+            <button className="home-cash-link" onClick={() => navigateTo('cash')}>
+              <span><small>ACCESO DIRECTO</small><strong>Caja</strong></span>
+              <span className="link-arrow">↗</span>
+            </button>
+            <div className="home-cash-bottom">
+              <div className="home-latest-record"><small>ÚLTIMO REGISTRO</small><strong>{contractSummary.latestContractDate ? formatDateTime24(contractSummary.latestContractDate) : 'Sin datos'}</strong></div>
+              <button type="button" className="withdrawal-button" disabled={cashSessionStatus !== 'open'} title={cashSessionStatus === 'open' ? 'Registrar un gasto pagado desde caja' : 'Abre una caja para registrar retiros'} onClick={() => { setCashWithdrawalAmount(''); setCashWithdrawalReason(''); setWithdrawalError(''); setIsCashWithdrawalDialogOpen(true) }}>Retiro de caja</button>
+            </div>
+          </div>
+        </section>
+        <section className="hero-section"><div className="hero-title-row"><h1>Contratos</h1><button type="button" className="hero-contract-count" aria-label={`Ver historial de ${contractSummary.totalContracts} contratos`} title="Ver historial de contratos" onClick={() => navigateTo('history')}><span>REGISTRADOS</span><strong>{contractSummary.totalContracts}</strong></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section>
+      </>}
+
+      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO No. {String(contractNumber).padStart(4, '0')} / PASO 0{step}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else navigateTo('review') }}><div className="field-grid">
         {step === 1 && <>
           <label>CI<input required aria-label="CI" value={form.document} onChange={(event) => updateDocument(event.target.value)} onBlur={() => void lookupClient()} placeholder="Ingrese CI" autoComplete="off" />
             {!firebaseEnabled && <small>La búsqueda de clientes requiere Firebase. Puedes completar los datos manualmente.</small>}
@@ -817,45 +1034,74 @@ function App() {
 
       {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
 
+      {view === 'sales' && <section className="workspace">
+        <div className="workspace-heading"><div><p className="eyebrow">VENTAS / {dateLabel.toUpperCase()}</p><h2>Registrar venta</h2></div><button className="text-button" onClick={() => navigateTo('cash')}>Ir a Caja ↗</button></div>
+        {cashError && <p className="login-error" role="alert">{cashError}</p>}
+        {saleSuccess && <p className="sale-success" role="status">{saleSuccess}</p>}
+        {cashSessionStatus === 'closed' ? <div className="cash-card full-width"><h3>Caja cerrada</h3><p>Abre una caja antes de registrar ventas.</p><button className="primary-button" onClick={() => { setOpeningBalanceInput(''); setCashSessionStatus('missing') }}>Abrir caja para vender <span>↗</span></button></div> : <div className="cash-grid sales-only">
+          <form className="cash-card" onSubmit={(event) => void handleSaleSubmit(event)} onChange={() => setSaleSuccess('')}>
+            <label>CI del comprador<input required value={saleForm.customerDocument} onChange={(event) => { saleClientLookupSequence.current += 1; setSaleClientLookupStatus('idle'); setSaleForm({ ...saleForm, customerDocument: event.target.value, customer: '', customerPhone: '', customerAddress: '' }) }} onBlur={() => void lookupSaleClient()} placeholder="Ingrese CI" autoComplete="off" />{saleClientLookupStatus === 'loading' && <small role="status">Buscando en Firebase...</small>}{saleClientLookupStatus === 'found' && <small role="status">Cliente encontrado en Firebase.</small>}{saleClientLookupStatus === 'not-found' && <small role="status">Cliente nuevo; quedará registrado al guardar la venta.</small>}{saleClientLookupStatus === 'error' && <small role="alert">No se pudo consultar Firebase. Verifica la conexión.</small>}</label>
+            <label>Nombre del comprador<input required value={saleForm.customer} onChange={(event) => setSaleForm({ ...saleForm, customer: event.target.value })} placeholder="Nombre y apellido" />{saleClientLookupStatus === 'not-found' && <small>Se guardará en el directorio junto con la venta.</small>}</label>
+            {saleClientLookupStatus === 'not-found' && <>
+              <label>Teléfono del comprador (opcional)<input type="tel" value={saleForm.customerPhone} onChange={(event) => setSaleForm({ ...saleForm, customerPhone: event.target.value })} placeholder="Número de teléfono" /></label>
+              <label>Dirección del comprador (opcional)<input value={saleForm.customerAddress} onChange={(event) => setSaleForm({ ...saleForm, customerAddress: event.target.value })} placeholder="Dirección" /></label>
+            </>}
+            <label>Producto<select required value={saleForm.productId} onChange={(event) => { const product = products.find((item) => item.id === event.target.value); setSaleForm({ ...saleForm, productId: event.target.value, unitPrice: String(product?.price || 0) }) }}>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
+            <label>Cantidad<input type="number" min="1" value={saleForm.quantity} onChange={(event) => setSaleForm({ ...saleForm, quantity: Number(event.target.value) || 1 })} /></label>
+            <label>Precio unitario (GS.)<input required type="text" inputMode="numeric" value={formatGsInput(saleForm.unitPrice)} onChange={(event) => setSaleForm({ ...saleForm, unitPrice: event.target.value.replace(/\D/g, '') })} placeholder="150.000" /><small>Subtotal del artículo: {guarani(parseAmount(saleForm.unitPrice) * saleForm.quantity)}</small></label>
+            <button type="button" className="secondary-button" onClick={addSaleItem}>Agregar artículo</button>
+            {saleCart.length > 0 && <div className="sale-cart" aria-label="Artículos agregados a la venta">
+              {saleCart.map((item) => <div className="sale-cart-row" key={item.id}>
+                <span><strong>{item.productName}</strong><small>{guarani(item.unitPrice)} c/u</small></span>
+                <span>{item.quantity}</span>
+                <strong>{guarani(item.quantity * item.unitPrice)}</strong>
+                <button type="button" className="sale-cart-remove" aria-label={`Quitar ${item.productName}`} onClick={() => removeSaleItem(item.id)}>Quitar</button>
+              </div>)}
+              <div className="sale-cart-total"><span>Total a cobrar</span><strong>{guarani(saleCartTotal)}</strong></div>
+            </div>}
+            <label>Forma de pago<select value={saleForm.paymentMethod} onChange={(event) => setSaleForm({ ...saleForm, paymentMethod: event.target.value })}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label>
+            <button type="submit" className="primary-button" disabled={isSavingSale || saleCart.length === 0}>{isSavingSale ? 'Guardando...' : 'Guardar venta'} <span>↗</span></button>
+          </form>
+        </div>}
+      </section>}
+
       {view === 'cash' && <section className="workspace">
-        <div className="workspace-heading"><div><p className="eyebrow">CAJA / {dateLabel.toUpperCase()}</p><h2>Control de caja</h2><p className="cash-session-status">{cashSessionStatus === 'open' ? `CAJA N° ${dailyCashSession?.sessionNumber} ABIERTA ${formatTime24(dailyCashSession?.openedAt)} · SALDO INICIAL ${guarani(dailyCashSession?.openingBalance || 0)}` : 'CERRADA'}</p></div><div className="cash-heading-actions">{cashSessionStatus === 'open' && <button className="save-button" onClick={() => setIsClosingCashDialogOpen(true)}>Cerrar caja</button>}{cashSessionStatus === 'closed' && dailyCashSession && <button className="secondary-button" onClick={() => downloadCashReport(dailyCashSession)}>Descargar cierre PDF</button>}<button className="text-button" onClick={() => setView('home')}>Cerrar ×</button></div></div>
+        <div className="workspace-heading"><div><p className="eyebrow">CAJA / {dateLabel.toUpperCase()}</p><h2>Control de caja</h2><p className="cash-session-status">{cashSessionStatus === 'open' ? `CAJA N° ${dailyCashSession?.sessionNumber} ABIERTA ${formatTime24(dailyCashSession?.openedAt)} · SALDO INICIAL ${guarani(dailyCashSession?.openingBalance || 0)}` : 'CERRADA'}</p></div><div className="cash-heading-actions">{cashSessionStatus === 'open' && <button className="save-button" onClick={() => setIsClosingCashDialogOpen(true)}>Cerrar caja</button>}{cashSessionStatus === 'closed' && dailyCashSession && <button className="secondary-button" onClick={() => void downloadCashReport(dailyCashSession).catch(() => setCashError('No se pudo descargar el PDF del cierre.'))}>Descargar cierre PDF</button>}<button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div></div>
         {cashError && <p className="login-error" role="alert">{cashError}</p>}
         {cashSessionStatus === 'closed' ? <div className="cash-card full-width"><h3>Caja N° {dailyCashSession?.sessionNumber} cerrada · {formatTime24(dailyCashSession?.closedAt)}</h3><p>El historial de ventas y movimientos de esta caja quedó archivado en el PDF. Los contratos de alquileres se conservan en su historial.</p><button className="primary-button" onClick={() => { setOpeningBalanceInput(''); setCashSessionStatus('missing') }}>Abrir otra caja hoy <span>↗</span></button></div> : <>
-          <div className="stats-grid cash-stats"><div className="stat-card"><span>Ventas hoy</span><strong>{salesSummary.todaySales}</strong></div><div className="stat-card"><span>Ingresos por ventas</span><strong>{guarani(salesSummary.totalRevenue)}</strong></div><div className="stat-card"><span>Artículos vendidos</span><strong>{salesSummary.totalItems}</strong></div></div>
-          <div className="cash-grid sales-only">
-            <form className="cash-card" onSubmit={(event) => void handleSaleSubmit(event)}>
-              <h3>Registrar venta</h3>
-              <label>Producto<select required value={saleForm.productId} onChange={(event) => { const product = products.find((item) => item.id === event.target.value); setSaleForm({ ...saleForm, productId: event.target.value, unitPrice: String(product?.price || 0) }) }}>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
-              <label>Cantidad<input type="number" min="1" value={saleForm.quantity} onChange={(event) => setSaleForm({ ...saleForm, quantity: Number(event.target.value) || 1 })} /></label>
-              <label>Precio unitario (GS.)<input required type="text" inputMode="numeric" value={formatGsInput(saleForm.unitPrice)} onChange={(event) => setSaleForm({ ...saleForm, unitPrice: event.target.value.replace(/\D/g, '') })} placeholder="150.000" /><small>Total de esta venta: {guarani(parseAmount(saleForm.unitPrice) * saleForm.quantity)}</small></label>
-              <label>CI del comprador<input required value={saleForm.customerDocument} onChange={(event) => { saleClientLookupSequence.current += 1; setSaleClientLookupStatus('idle'); setSaleForm({ ...saleForm, customerDocument: event.target.value, customer: '' }) }} onBlur={() => void lookupSaleClient()} placeholder="Ingrese CI" autoComplete="off" />{saleClientLookupStatus === 'loading' && <small role="status">Buscando en Firebase...</small>}{saleClientLookupStatus === 'found' && <small role="status">Cliente encontrado en Firebase.</small>}{saleClientLookupStatus === 'not-found' && <small role="status">No existe ese CI en Firebase; completa el nombre para registrarlo.</small>}{saleClientLookupStatus === 'error' && <small role="alert">No se pudo consultar Firebase. Verifica la conexión.</small>}</label>
-              <label>Nombre del comprador<input required value={saleForm.customer} onChange={(event) => setSaleForm({ ...saleForm, customer: event.target.value })} placeholder="Nombre y apellido" /></label>
-              <label>Forma de pago<select value={saleForm.paymentMethod} onChange={(event) => setSaleForm({ ...saleForm, paymentMethod: event.target.value })}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label>
-              <button type="submit" className="primary-button" disabled={isSavingSale}>{isSavingSale ? 'Guardando...' : 'Guardar venta'} <span>↗</span></button>
-            </form>
-          </div>
+          <div className="stats-grid cash-stats"><div className="stat-card"><span>Fondo inicial</span><strong>{guarani(dailyCashSession?.openingBalance || 0)}</strong></div><div className="stat-card"><span>Total ingresado</span><strong>{guarani(cashReconciliation.totalAmount)}</strong></div><div className="stat-card"><span>Retiros</span><strong>{guarani(totalCashWithdrawals)}</strong></div><div className="stat-card"><span>Efectivo esperado</span><strong>{guarani(expectedCash)}</strong></div></div>
           <div className="cash-card full-width">
             <h3>Arqueo del día</h3>
             <div className="payment-totals">{paymentMethods.map((method) => <div className="payment-total" key={method}><span>{method}</span><strong>{guarani(cashReconciliation.totalsByMethod[method])}</strong></div>)}<div className="payment-total payment-grand-total"><span>Total ingresado</span><strong>{guarani(cashReconciliation.totalAmount)}</strong></div></div>
             {cashReconciliation.entries.length === 0 ? <p className="cash-empty">Aún no hay cobros registrados hoy.</p> : <div className="sales-list">{cashReconciliation.entries.map((entry) => <div className="sale-row reconciliation-row" key={entry.id}><span><strong>{entry.customer}</strong><small>CI {entry.customerDocument || 'N/D'} · {entry.reference} · {entry.concept}</small></span><span>{entry.paymentMethod}</span><strong>{guarani(entry.amount)}</strong><small>{formatTime24(entry.paidAt)}</small></div>)}</div>}
           </div>
-          <div className="cash-card full-width"><h3>Historial de ventas del día</h3>{todaySales.length === 0 ? <p className="cash-empty">Aún no hay ventas registradas hoy.</p> : <div className="sales-list">{todaySales.map((sale) => <div className="sale-row" key={sale.id}><span><strong>{sale.customer}</strong><small>CI {sale.customerDocument || 'N/D'} · {sale.productName} · {sale.receiptNumber || `REC-${String(sale.id).slice(0, 8).toUpperCase()}`}</small></span><span>{sale.quantity} und</span><span>{sale.paymentMethod || 'Efectivo'}</span><strong>{guarani(sale.unitPrice * sale.quantity)}</strong></div>)}</div>}</div>
+          <div className="cash-card full-width"><div className="withdrawal-list-heading"><h3>Retiros de caja</h3><strong>{guarani(totalCashWithdrawals)}</strong></div>{cashWithdrawals.length === 0 ? <p className="cash-empty">Aún no hay retiros registrados en esta caja.</p> : <div className="sales-list">{cashWithdrawals.map((withdrawal) => <div className="sale-row withdrawal-row" key={withdrawal.id}><span><strong>{withdrawal.reason}</strong><small>Retiro justificado · {formatDateTime24(withdrawal.withdrawnAt)}</small></span><span>Gasto</span><strong>-{guarani(withdrawal.amount)}</strong></div>)}</div>}</div>
         </>}
       </section>}
 
-      {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); setView('review') }}><span className="row-number">{String(contract.contractNumber || index + 1).padStart(4, '0')}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
-      {(view === 'form' || view === 'review') && <section className="workspace payment-method-section"><div className="cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>Se registra junto al contrato y su número en el arqueo diario.</small></div></section>}
+      {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{String(contract.contractNumber || index + 1).padStart(4, '0')}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
+      {view === 'form' && step === 2 && <section className="workspace payment-method-section"><div className="cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div></section>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
-        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Aún no se abrió la caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="number" min="0" step="1" value={openingBalanceInput} onChange={(event) => setOpeningBalanceInput(event.target.value)} placeholder="Ej. 500000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
+        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => { clearSession(); setIsAuthenticated(false) }}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
       </section></div>}
       {isClosingCashDialogOpen && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="close-cash-title">
         <p className="eyebrow">CIERRE DE CAJA / {dateLabel.toUpperCase()}</p><h2 id="close-cash-title">Cuenta el efectivo</h2>
-        <div className="cash-close-summary"><span>Fondo inicial<strong>{guarani(dailyCashSession?.openingBalance || 0)}</strong></span><span>Efectivo esperado<strong>{guarani(expectedCash)}</strong></span><span>Ingresos totales<strong>{guarani(cashReconciliation.totalAmount)}</strong></span></div>
-        <form onSubmit={(event) => void handleCloseCash(event)}><label>Efectivo contado en caja (GS.)<input autoFocus required type="number" min="0" step="1" value={closingCashInput} onChange={(event) => setClosingCashInput(event.target.value)} placeholder="Monto contado" /></label><p className="cash-difference">Diferencia: <strong>{guarani(cashCloseSummary.cashDifference)}</strong></p>{cashError && <p className="login-error" role="alert">{cashError}</p>}<div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setIsClosingCashDialogOpen(false)} disabled={isClosingCash}>Cancelar</button><button type="submit" className="save-button" disabled={isClosingCash}>{isClosingCash ? 'Cerrando...' : 'Cerrar caja y descargar PDF'}</button></div></form>
+        <div className="cash-close-summary"><span>Fondo inicial<strong>{guarani(dailyCashSession?.openingBalance || 0)}</strong></span><span>Ingresos totales<strong>{guarani(cashReconciliation.totalAmount)}</strong></span><span>Retiros<strong>{guarani(totalCashWithdrawals)}</strong></span><span>Efectivo esperado<strong>{guarani(expectedCash)}</strong></span></div>
+        <form onSubmit={(event) => void handleCloseCash(event)}><label>Efectivo contado en caja (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(closingCashInput)} onChange={(event) => setClosingCashInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label><p className="cash-difference">Diferencia: <strong>{formatGuaraniDifference(cashCloseSummary.cashDifference)}</strong></p>{cashError && <p className="login-error" role="alert">{cashError}</p>}<div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setIsClosingCashDialogOpen(false)} disabled={isClosingCash}>Cancelar</button><button type="submit" className="save-button" disabled={isClosingCash}>{isClosingCash ? 'Cerrando...' : 'Cerrar caja y descargar PDF'}</button></div></form>
+      </section></div>}
+      {isCashWithdrawalDialogOpen && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="withdrawal-title">
+        <p className="eyebrow">MOVIMIENTO DE CAJA / {dateLabel.toUpperCase()}</p><h2 id="withdrawal-title">Registrar retiro</h2>
+        <p>Efectivo disponible: <strong>{guarani(cashAvailableForWithdrawal)}</strong>. El monto se descontará del cierre de caja.</p>
+        <form onSubmit={(event) => void handleCashWithdrawalSubmit(event)}>
+          <label>Monto del retiro (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(cashWithdrawalAmount)} onChange={(event) => setCashWithdrawalAmount(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 50.000" /><small>Disponible: {guarani(cashAvailableForWithdrawal)}</small></label>
+          <label>Justificación<textarea required maxLength={240} value={cashWithdrawalReason} onChange={(event) => setCashWithdrawalReason(event.target.value)} placeholder="Ej. Compra de papel higiénico" /></label>
+          {withdrawalError && <p className="login-error" role="alert">{withdrawalError}</p>}
+          <div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setIsCashWithdrawalDialogOpen(false)} disabled={isSavingCashWithdrawal}>Cancelar</button><button type="submit" className="save-button" disabled={isSavingCashWithdrawal}>{isSavingCashWithdrawal ? 'Registrando...' : 'Registrar retiro'}</button></div>
+        </form>
       </section></div>}
       {view === 'clients' && <section className="workspace clients-workspace"><div className="workspace-heading"><div><p className="eyebrow">DIRECTORIO / {registeredClients.length} CLIENTES</p><h2>Clientes registrados</h2></div></div><div className="history-toolbar"><input className="search-input" value={clientSearchTerm} onChange={(event) => setClientSearchTerm(event.target.value)} placeholder="Buscar por nombre, CI, teléfono o dirección" /><span className="history-summary">{filteredClients.length} resultados</span></div>{filteredClients.length === 0 ? <div className="empty-state compact-empty"><span>⌕</span><h3>{registeredClients.length === 0 ? 'Aún no hay clientes registrados' : 'No hay coincidencias'}</h3><p>{registeredClients.length === 0 ? 'Los clientes aparecerán aquí al guardar contratos o ventas con CI.' : 'Prueba otro nombre o número de documento.'}</p></div> : <div className="client-list">{filteredClients.map((client) => <article className="client-row" key={client.document}><span className="client-monogram">{client.name.charAt(0).toUpperCase()}</span><span className="client-primary"><strong>{client.name}</strong><small>CI {client.document}</small></span><span className="client-detail">{client.phone || 'Teléfono no registrado'}</span><span className="client-detail">{client.address || 'Dirección no registrada'}</span><span className="client-updated">{client.updatedAt ? `ACTUALIZADO ${formatDateTime24(client.updatedAt)}` : 'REGISTRADO'}</span></article>)}</div>}</section>}
-    </main><footer><span>SASTRERÍA CONTROL © 2026</span><span>{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></footer>
+    </main><footer><div className="footer-brand"><strong>SASTRERÍA VLADIMIR</strong><span>DESDE 2012 <i>·</i> ELEGANCIA QUE DEJA HUELLA</span></div></footer>
   </div>
 }
 

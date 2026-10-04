@@ -1,6 +1,7 @@
 import { getApps, initializeApp } from 'firebase/app'
 import { collection, doc, getDoc, getDocs, getFirestore, query, runTransaction, setDoc, where, writeBatch } from 'firebase/firestore'
 import { parseAmount } from './money.js'
+import { getSaleDescription, getSaleTotal, type SaleRecord } from './sales.js'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -19,6 +20,13 @@ export const firebaseApp = hasFirebaseConfig
   : null
 export const firestore = firebaseApp ? getFirestore(firebaseApp) : null
 
+export type CashWithdrawal = {
+  id: string
+  amount: number
+  reason: string
+  withdrawnAt: string
+}
+
 export type DailyCashSession = {
   id: string
   dateKey: string
@@ -32,6 +40,8 @@ export type DailyCashSession = {
   cashDifference?: number
   totalsByMethod?: Record<string, number>
   totalIncome?: number
+  withdrawals?: CashWithdrawal[]
+  totalCashWithdrawals?: number
 }
 
 const localCashSessionsKey = 'sastreria-caja-sesiones'
@@ -139,9 +149,42 @@ export async function openDailyCashSession(dateKey: string, openingBalance: numb
   return session
 }
 
+export async function recordCashWithdrawal(
+  sessionToUpdate: DailyCashSession,
+  withdrawal: CashWithdrawal,
+): Promise<DailyCashSession> {
+  const sessionRef = firestore ? doc(firestore, 'cajas', sessionToUpdate.id) : null
+
+  if (firestore && sessionRef) {
+    const session = await runTransaction(firestore, async (transaction) => {
+      const snapshot = await transaction.get(sessionRef)
+      if (!snapshot.exists()) throw new Error('No se encontró la sesión de caja.')
+      const current = { ...snapshot.data(), id: sessionToUpdate.id, dateKey: sessionToUpdate.dateKey } as DailyCashSession
+      if (current.status !== 'open') throw new Error('No se pueden registrar retiros en una caja cerrada.')
+      if (current.withdrawals?.some((item) => item.id === withdrawal.id)) return current
+
+      const updatedSession = { ...current, withdrawals: [...(current.withdrawals || []), withdrawal] }
+      transaction.set(sessionRef, updatedSession)
+      return updatedSession
+    })
+    cacheCashSession(session)
+    return session
+  }
+
+  const current = getCachedCashSessions().find((session) => session.id === sessionToUpdate.id)
+    || getCachedOpenCashSession(sessionToUpdate.dateKey)
+  if (!current) throw new Error('No se encontró la sesión de caja.')
+  if (current.status !== 'open') throw new Error('No se pueden registrar retiros en una caja cerrada.')
+  if (current.withdrawals?.some((item) => item.id === withdrawal.id)) return current
+
+  const session = { ...current, withdrawals: [...(current.withdrawals || []), withdrawal] }
+  cacheCashSession(session)
+  return session
+}
+
 export async function closeDailyCashSession(
   sessionToClose: DailyCashSession,
-  closing: Pick<DailyCashSession, 'countedCash' | 'expectedCash' | 'cashDifference' | 'totalsByMethod' | 'totalIncome'>,
+  closing: Pick<DailyCashSession, 'countedCash' | 'expectedCash' | 'cashDifference' | 'totalsByMethod' | 'totalIncome' | 'totalCashWithdrawals'>,
 ): Promise<DailyCashSession> {
   const sessionRef = firestore ? doc(firestore, 'cajas', sessionToClose.id) : null
 
@@ -183,8 +226,8 @@ function saleMovement(sale: Record<string, unknown>) {
     customerDocument: sale.customerDocument || '',
     reference: sale.receiptNumber || `REC-${String(sale.id).slice(0, 8).toUpperCase()}`,
     paymentMethod: sale.paymentMethod || 'Efectivo',
-    amount: Number(sale.unitPrice || 0) * Number(sale.quantity || 0),
-    concept: sale.productName || 'Venta',
+    amount: getSaleTotal(sale as SaleRecord),
+    concept: getSaleDescription(sale as SaleRecord),
     paidAt: sale.soldAt,
   }
 }
@@ -326,16 +369,31 @@ export async function saveSaleToFirestore(
   const customerRef = customerDocument ? doc(firestore, 'clientes', customerDocument) : null
 
   return runTransaction(firestore, async (transaction) => {
-    const receiptCounterSnapshot = await transaction.get(receiptCounterRef)
+    const [receiptCounterSnapshot, customerSnapshot] = await Promise.all([
+      transaction.get(receiptCounterRef),
+      customerRef ? transaction.get(customerRef) : Promise.resolve(null),
+    ])
     const nextReceiptNumber = Number(receiptCounterSnapshot.data()?.nextNumber || 1)
     const savedSale = { ...sale, receiptNumber: `REC-${String(nextReceiptNumber).padStart(7, '0')}` }
     transaction.set(receiptCounterRef, { nextNumber: nextReceiptNumber + 1 }, { merge: true })
     transaction.set(saleRef, savedSale)
     transaction.set(cashRef, saleMovement(savedSale))
     if (customerRef && customerDocument) {
+      const existingCustomer = customerSnapshot?.data()
+      const customerName = typeof sale.customer === 'string' && sale.customer.trim()
+        ? sale.customer.trim()
+        : typeof existingCustomer?.name === 'string' ? existingCustomer.name : ''
+      const customerPhone = typeof sale.customerPhone === 'string' && sale.customerPhone.trim()
+        ? sale.customerPhone.trim()
+        : typeof existingCustomer?.phone === 'string' ? existingCustomer.phone : ''
+      const customerAddress = typeof sale.customerAddress === 'string' && sale.customerAddress.trim()
+        ? sale.customerAddress.trim()
+        : typeof existingCustomer?.address === 'string' ? existingCustomer.address : ''
       transaction.set(customerRef, {
-        name: sale.customer || '',
+        name: customerName,
         document: customerDocument,
+        phone: customerPhone,
+        address: customerAddress,
         updatedAt: new Date().toISOString(),
       }, { merge: true })
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCashCloseSummary, buildCashReconciliation, buildSalesSummary, defaultProducts, getLocalDateKey } from './sales.js';
+import { buildCashCloseSummary, buildCashReconciliation, buildSalesSummary, defaultProducts, getLocalDateKey, getSaleDescription, getSaleItemCount, getSaleTotal } from './sales.js';
 
 test('sale products include the requested items without stock tracking', () => {
   assert.deepEqual(defaultProducts.filter((product) => ['corbata', 'chaleco', 'pantalon-solo'].includes(product.id)).map((product) => product.name), [
@@ -45,6 +45,7 @@ test('reconcile daily sales and contract deposits by payment method and referenc
     ['Carlos Díaz', 'CONTRATO N° 0000042'],
     ['Ana Pérez', 'REC-000001'],
   ]);
+  assert.deepEqual(result.entries.map(({ movementType }) => movementType), ['ALQUILER', 'VENTA']);
 });
 
 test('cash closing compares the counted amount with opening balance plus cash payments', () => {
@@ -52,6 +53,14 @@ test('cash closing compares the counted amount with opening balance plus cash pa
     expectedCash: 740000,
     countedCash: 730000,
     cashDifference: -10000,
+  });
+});
+
+test('cash withdrawals reduce the expected closing balance', () => {
+  assert.deepEqual(buildCashCloseSummary(500000, 240000, 690000, 50000), {
+    expectedCash: 690000,
+    countedCash: 690000,
+    cashDifference: 0,
   });
 });
 
@@ -76,4 +85,26 @@ test('cash reconciliation isolates multiple sessions opened on the same day', ()
   assert.equal(firstCash.totalAmount, 120000);
   assert.equal(secondCash.totalAmount, 65000);
   assert.deepEqual(secondCash.entries.map((entry) => entry.concept), ['Seña de alquiler', 'Corbata']);
+});
+
+test('a multi-item sale totals every product as one cash movement', () => {
+  const sale = {
+    id: 'multi-item-sale',
+    items: [
+      { productName: 'Camisa blanca', quantity: 2, unitPrice: 120000 },
+      { productName: 'Cinto', quantity: 1, unitPrice: 90000 },
+    ],
+  };
+
+  assert.equal(getSaleTotal(sale), 330000);
+  assert.equal(getSaleItemCount(sale), 3);
+  assert.equal(getSaleDescription(sale), 'Camisa blanca x 2, Cinto');
+
+  const reconciliation = buildCashReconciliation([
+    { ...sale, customer: 'Ana', paymentMethod: 'Efectivo', soldAt: new Date().toISOString() },
+  ], [], getLocalDateKey());
+
+  assert.equal(reconciliation.entries.length, 1);
+  assert.equal(reconciliation.entries[0].amount, 330000);
+  assert.equal(reconciliation.totalsByMethod.Efectivo, 330000);
 });

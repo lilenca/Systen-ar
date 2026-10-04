@@ -9,7 +9,26 @@ export type SaleProduct = {
 export const defaultProducts: SaleProduct[]
 export const paymentMethods: readonly PaymentMethod[]
 export function getLocalDateKey(value?: Date | string): string
-export function buildCashCloseSummary(openingBalance: number, cashIncome: number, countedCash: number): {
+export type SaleLineItem = {
+  id?: string
+  productId?: string
+  productName?: string
+  quantity?: number
+  unitPrice?: number
+}
+export type SaleRecord = {
+  id?: string
+  productId?: string
+  productName?: string
+  quantity?: number
+  unitPrice?: number
+  totalAmount?: number
+  items?: SaleLineItem[]
+}
+export function getSaleTotal(sale: SaleRecord): number
+export function getSaleItemCount(sale: SaleRecord): number
+export function getSaleDescription(sale: SaleRecord): string
+export function buildCashCloseSummary(openingBalance: number, cashIncome: number, countedCash: number, cashWithdrawals?: number): {
   expectedCash: number
   countedCash: number
   cashDifference: number
@@ -20,6 +39,8 @@ export function buildSalesSummary(sales: Array<{
   soldAt?: string
   unitPrice?: number
   quantity?: number
+  totalAmount?: number
+  items?: SaleLineItem[]
 }>, dateKey?: string, cashSessionId?: string, sessionNumber?: number): {
   totalRevenue: number
   totalItems: number
@@ -38,6 +59,8 @@ export function buildCashReconciliation(
     quantity?: number
     productName?: string
     soldAt?: string
+    totalAmount?: number
+    items?: SaleLineItem[]
   }>,
   contracts: Array<{
     id?: string
@@ -55,6 +78,7 @@ export function buildCashReconciliation(
 ): {
   entries: Array<{
     id: string
+    movementType: 'VENTA' | 'ALQUILER'
     customer: string
     customerDocument: string
     reference: string

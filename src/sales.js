@@ -22,8 +22,8 @@ export function getLocalDateKey(value = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
-export function buildCashCloseSummary(openingBalance, cashIncome, countedCash) {
-  const expectedCash = Number(openingBalance || 0) + Number(cashIncome || 0);
+export function buildCashCloseSummary(openingBalance, cashIncome, countedCash, cashWithdrawals = 0) {
+  const expectedCash = Number(openingBalance || 0) + Number(cashIncome || 0) - Number(cashWithdrawals || 0);
   const actualCash = Number(countedCash || 0);
   return { expectedCash, countedCash: actualCash, cashDifference: actualCash - expectedCash };
 }
@@ -34,14 +34,36 @@ function belongsToCashSession(item, cashSessionId, sessionNumber) {
   return sessionNumber === 1;
 }
 
+export function getSaleTotal(sale = {}) {
+  if (Array.isArray(sale.items) && sale.items.length > 0) {
+    return sale.items.reduce((total, item) => total + Number(item.unitPrice || 0) * Number(item.quantity || 0), 0);
+  }
+  if (sale.totalAmount !== undefined) return Number(sale.totalAmount || 0);
+  return Number(sale.unitPrice || 0) * Number(sale.quantity || 0);
+}
+
+export function getSaleItemCount(sale = {}) {
+  if (Array.isArray(sale.items) && sale.items.length > 0) {
+    return sale.items.reduce((total, item) => total + Number(item.quantity || 0), 0);
+  }
+  return Number(sale.quantity || 0);
+}
+
+export function getSaleDescription(sale = {}) {
+  if (Array.isArray(sale.items) && sale.items.length > 0) {
+    return sale.items.map((item) => `${item.productName || 'Producto'}${Number(item.quantity) > 1 ? ` x ${item.quantity}` : ''}`).join(', ');
+  }
+  return sale.productName || 'Venta';
+}
+
 export function buildSalesSummary(sales = [], dateKey = getLocalDateKey(), cashSessionId, sessionNumber = 1) {
   const todaySales = sales.filter((sale) => {
     if (!sale.soldAt) return false;
     return getLocalDateKey(sale.soldAt) === dateKey && belongsToCashSession(sale, cashSessionId, sessionNumber);
   });
 
-  const totalRevenue = todaySales.reduce((sum, sale) => sum + Number(sale.unitPrice || 0) * Number(sale.quantity || 0), 0);
-  const totalItems = todaySales.reduce((sum, sale) => sum + Number(sale.quantity || 0), 0);
+  const totalRevenue = todaySales.reduce((sum, sale) => sum + getSaleTotal(sale), 0);
+  const totalItems = todaySales.reduce((sum, sale) => sum + getSaleItemCount(sale), 0);
 
   return {
     totalRevenue,
@@ -56,18 +78,20 @@ export function buildCashReconciliation(sales = [], contracts = [], dateKey = ge
       .filter((sale) => sale.soldAt && getLocalDateKey(sale.soldAt) === dateKey && belongsToCashSession(sale, cashSessionId, sessionNumber))
       .map((sale) => ({
         id: sale.id,
+        movementType: 'VENTA',
         customer: sale.customer || 'Venta directa',
         customerDocument: sale.customerDocument || '',
         reference: sale.receiptNumber || `REC-${String(sale.id || '').slice(0, 8).toUpperCase()}`,
         paymentMethod: paymentMethods.includes(sale.paymentMethod) ? sale.paymentMethod : 'Efectivo',
-        amount: Number(sale.unitPrice || 0) * Number(sale.quantity || 0),
-        concept: sale.productName || 'Venta',
+        amount: getSaleTotal(sale),
+        concept: getSaleDescription(sale),
         paidAt: sale.soldAt,
       })),
     ...contracts
       .filter((contract) => contract.createdAt && getLocalDateKey(contract.createdAt) === dateKey && belongsToCashSession(contract, cashSessionId, sessionNumber) && parseAmount(contract.depositValue) > 0)
       .map((contract) => ({
         id: `contract-${contract.id}`,
+        movementType: 'ALQUILER',
         customer: contract.tenant || 'Cliente sin nombre',
         customerDocument: contract.document || '',
         reference: `CONTRATO N° ${String(contract.contractNumber || '').padStart(7, '0')}`,

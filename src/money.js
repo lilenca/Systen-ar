@@ -13,3 +13,10 @@ export function parseAmount(value) {
 export function roundAmount(value) {
   return Math.max(0, Math.round(Number(value) || 0));
 }
+
+export function formatGuaraniDifference(value) {
+  const numericValue = Number(value);
+  const amount = Number.isFinite(numericValue) ? Math.round(numericValue) : 0;
+  const formattedAmount = Math.abs(amount).toLocaleString('es-PY', { maximumFractionDigits: 0 });
+  return `${amount < 0 ? '-' : ''}GS. ${formattedAmount}`;
+}
