@@ -970,7 +970,7 @@ function App() {
   }
 
   const focusNextFieldOnEnter = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
     const target = event.target
     if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) return
     if (target instanceof HTMLInputElement && ['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'hidden', 'image'].includes(target.type)) return
