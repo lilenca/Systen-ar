@@ -464,3 +464,14 @@ textarea { min-height: 110px; resize: vertical; }
   background: #c2dd8a;
   color: #26351e;
 }
+.app-shell .topbar {
+  background: rgba(35, 65, 47, .96);
+  border-bottom-color: rgba(194, 221, 138, .32);
+}
+.app-shell .topbar .status,
+.app-shell .topbar .status-detail {
+  color: #e2eadb;
+}
+.app-shell .topbar .status-separator {
+  color: #c2dd8a;
+}
