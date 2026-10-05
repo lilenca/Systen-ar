@@ -465,8 +465,8 @@ textarea { min-height: 110px; resize: vertical; }
   color: #26351e;
 }
 .app-shell .topbar {
-  background: rgba(35, 65, 47, .96);
-  border-bottom-color: rgba(194, 221, 138, .32);
+  background: rgba(63, 74, 47, .98);
+  border-bottom-color: rgba(194, 221, 138, .36);
 }
 .app-shell .topbar .status,
 .app-shell .topbar .status-detail {
