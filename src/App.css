@@ -434,3 +434,26 @@ textarea { min-height: 110px; resize: vertical; }
 .app-shell .form-card input, .app-shell .form-card textarea, .app-shell .form-card fieldset { background: rgba(20, 16, 14, .92); color: #f4e8d2; border-color: rgba(214, 173, 104, .42); }.app-shell .form-card input::placeholder, .app-shell .form-card textarea::placeholder { color: rgba(244, 232, 210, .55); }.article-picker { padding: 18px; }.article-option { color: #f4e8d2; }.article-option span { color: #d6ad68; }.custom-article { border-top: 1px solid rgba(214, 173, 104, .25); padding-top: 14px; }.price-list { background: rgba(20, 16, 14, .92); color: #f4e8d2; border-color: rgba(214, 173, 104, .42); }.price-list label { color: #f4e8d2; }
 .app-shell main { background: transparent !important; }.hero-section, .hero-section h1, .hero-copy, .hero-section .eyebrow, .home-grid, .feature-link, .feature-note { background: transparent !important; }.hero-section h1 { color: #fff !important; text-shadow: 0 2px 18px rgba(0, 0, 0, .65); }.hero-copy { color: #f4e8d2 !important; text-shadow: 0 1px 10px rgba(0, 0, 0, .75); }.hero-section .eyebrow { color: #f0d09a !important; }.hero-section .primary-button { background: #f0d09a !important; color: #241b16 !important; border: 0; }.hero-figure { background: rgba(16, 12, 10, .7) !important; border: 1px solid rgba(240, 208, 154, .5) !important; box-shadow: 0 18px 50px rgba(0, 0, 0, .28); }.figure-label, .figure-caption { color: #f0d09a !important; }.home-grid { border-color: rgba(240, 208, 154, .35) !important; }.feature-link strong, .feature-link small, .feature-link b, .feature-note, .feature-note p { color: #f4e8d2 !important; }.feature-link:hover { background: rgba(0, 0, 0, .28) !important; }
 .hero-section { grid-template-columns: 1fr; }.hero-figure { display: none; }
+.app-shell :is(.primary-button, .secondary-button, .save-button, .header-nav-button, .logout-button, .withdrawal-button) {
+  background: #f0d09a;
+  border: 1px solid #f0d09a;
+  color: #241b16;
+  box-shadow: 0 8px 18px rgba(214, 173, 104, .16);
+}
+.app-shell :is(.primary-button, .secondary-button, .save-button, .header-nav-button, .logout-button, .withdrawal-button):hover:not(:disabled) {
+  background: #d6ad68;
+  border-color: #d6ad68;
+  color: #241b16;
+}
+.app-shell .header-nav-button + .header-nav-button {
+  background: #c2dd8a;
+  border-color: #c2dd8a;
+  color: #26351e;
+}
+.app-shell .header-nav-button + .header-nav-button:hover {
+  background: #b1cf72;
+  border-color: #b1cf72;
+  color: #26351e;
+}
+.app-shell .text-button { color: #f0d09a; }
+.app-shell .text-button:hover { color: #d6ad68; }

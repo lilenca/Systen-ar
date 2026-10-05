@@ -39,6 +39,16 @@ npm run build
 
 4. El proyecto ya incluye `vercel.json` para manejar rutas SPA y redirigir todas las URLs a `index.html`.
 
+## Reglas de Firestore
+
+El archivo `firestore.rules` permite leer y escribir las colecciones de la aplicación solo a usuarios autenticados. Para publicar las reglas en el proyecto Firebase configurado:
+
+```bash
+npx firebase-tools deploy --only firestore:rules --project arriendo-2d45d
+```
+
+Ejecuta el comando desde una terminal con Firebase CLI autenticado en una cuenta con permisos para administrar las reglas del proyecto. No uses reglas públicas para solucionar errores de permisos.
+
 ## Desarrollo local
 
 ```bash
