@@ -457,3 +457,10 @@ textarea { min-height: 110px; resize: vertical; }
 }
 .app-shell .text-button { color: #f0d09a; }
 .app-shell .text-button:hover { color: #d6ad68; }
+.app-shell .status-mode {
+  display: inline-block;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #c2dd8a;
+  color: #26351e;
+}
