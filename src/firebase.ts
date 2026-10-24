@@ -356,6 +356,46 @@ export async function findClientByDocument(document: string) {
   }
 }
 
+export async function updateClientInFirestore(client: { document: string; name: string; phone: string; address: string }) {
+  if (!firestore) return
+  const updatedAt = new Date().toISOString()
+  await setDoc(doc(firestore, 'clientes', client.document.trim()), {
+    name: client.name,
+    document: client.document.trim(),
+    phone: client.phone,
+    address: client.address,
+    manuallyEdited: true,
+    updatedAt,
+  }, { merge: true })
+}
+
+export async function renameClientInFirestore(oldDocument: string, client: { document: string; name: string; phone: string; address: string }) {
+  if (!firestore) return
+  const from = oldDocument.trim()
+  const to = client.document.trim()
+  const updatedAt = new Date().toISOString()
+
+  if (from === to) {
+    await updateClientInFirestore(client)
+    return
+  }
+
+  const targetSnapshot = await getDoc(doc(firestore, 'clientes', to))
+  if (targetSnapshot.exists()) throw new Error('Ya existe un cliente con esa CI.')
+
+  const [contractsSnapshot, salesSnapshot] = await Promise.all([
+    getDocs(query(collection(firestore, 'contratos'), where('document', '==', from))),
+    getDocs(query(collection(firestore, 'ventas'), where('customerDocument', '==', from))),
+  ])
+
+  const batch = writeBatch(firestore)
+  batch.set(doc(firestore, 'clientes', to), { name: client.name, document: to, phone: client.phone, address: client.address, manuallyEdited: true, updatedAt })
+  batch.delete(doc(firestore, 'clientes', from))
+  contractsSnapshot.docs.forEach((snapshot) => batch.update(snapshot.ref, { document: to }))
+  salesSnapshot.docs.forEach((snapshot) => batch.update(snapshot.ref, { customerDocument: to }))
+  await batch.commit()
+}
+
 export async function saveContractToFirestore(contract: Record<string, unknown>) {
   if (!firestore) throw new Error('Firebase no está configurado.')
 

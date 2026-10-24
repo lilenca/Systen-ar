@@ -1,10 +1,75 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, observeAuthentication, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, signIn, signOut, type CashWithdrawal, type DailyCashSession } from './firebase'
+import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, observeAuthentication, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, signIn, signOut, renameClientInFirestore, type CashWithdrawal, type DailyCashSession } from './firebase'
 import { filterContracts, summarizeContracts } from './contractInsights.js'
 import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleDescription, paymentMethods, type SaleProduct } from './sales.js'
 import { formatGuaraniDifference, parseAmount, roundAmount } from './money.js'
 import loginBackground from './assets/login-background.jpg'
 import './App.css'
+
+const garmentColors = ['Negro', 'Beige', 'Azul', 'Celeste']
+const CONTRACT_PREFIX = '001'
+
+const isoToDisplayDate = (iso: string) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : ''
+}
+
+const displayToIsoDate = (display: string) => {
+  const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(display)
+  if (!match) return ''
+  const [, day, month, year] = match
+  const date = new Date(Number(year), Number(month) - 1, Number(day))
+  const valid = date.getFullYear() === Number(year) && date.getMonth() === Number(month) - 1 && date.getDate() === Number(day)
+  return valid ? `${year}-${month}-${day}` : ''
+}
+
+function DateInput({ value, onChange }: { value: string; onChange: (iso: string) => void }) {
+  const [text, setText] = useState(isoToDisplayDate(value))
+
+  useEffect(() => {
+    setText((current) => displayToIsoDate(current) === value ? current : isoToDisplayDate(value))
+  }, [value])
+
+  const handleChange = (raw: string) => {
+    const digits = raw.replace(/\D/g, '').slice(0, 8)
+    const formatted = [digits.slice(0, 2), digits.slice(2, 4), digits.slice(4)].filter(Boolean).join('/')
+    setText(formatted)
+    onChange(displayToIsoDate(formatted))
+  }
+
+  const pickerRef = useRef<HTMLInputElement>(null)
+
+  const openPicker = () => {
+    const picker = pickerRef.current
+    if (!picker) return
+    try { picker.showPicker() } catch { picker.focus() }
+  }
+
+  return <span className="date-input"><input required inputMode="numeric" autoComplete="off" pattern="\d{2}/\d{2}/\d{4}" title="Formato: dd/mm/aaaa" placeholder="dd/mm/aaaa" maxLength={10} value={text} onChange={(event) => handleChange(event.target.value)} onInvalid={(event) => event.currentTarget.setCustomValidity('Ingresa una fecha válida: dd/mm/aaaa')} onInput={(event) => event.currentTarget.setCustomValidity('')} /><button type="button" className="date-picker-button" aria-label="Abrir calendario" onClick={openPicker}>📅</button><input ref={pickerRef} className="date-picker-native" type="date" tabIndex={-1} aria-hidden="true" value={value} onChange={(event) => onChange(event.target.value)} /></span>
+}
+
+const formatParaguayPhone = (raw: string) => {
+  let digits = raw.replace(/\D/g, '')
+  if (digits.startsWith('595')) digits = digits.slice(3)
+  digits = digits.replace(/^0+/, '').slice(0, 9)
+  return digits ? `+595 ${digits}` : ''
+}
+const MAX_LOGIN_ATTEMPTS = 3
+const LOGIN_LOCK_MS = 15 * 60 * 1000
+const LOGIN_ATTEMPTS_KEY = 'loginFailedAttempts'
+const LOGIN_LOCK_KEY = 'loginLockedUntil'
+
+const readLoginLock = () => {
+  const until = Number(localStorage.getItem(LOGIN_LOCK_KEY) || 0)
+  if (until > Date.now()) return until
+  if (until) {
+    localStorage.removeItem(LOGIN_LOCK_KEY)
+    localStorage.removeItem(LOGIN_ATTEMPTS_KEY)
+  }
+  return 0
+}
+
+const lockMessage = (until: number) => `Demasiados intentos fallidos. Intenta de nuevo en ${Math.max(1, Math.ceil((until - Date.now()) / 60000))} minuto(s).`
 
 type Contract = {
   id: string
@@ -72,6 +137,7 @@ type RegisteredClient = {
   phone?: string
   address?: string
   updatedAt?: string
+  manuallyEdited?: boolean
 }
 
 const catalog = ['Traje', 'Camisa', 'Corbata', 'Zapato', 'Cinto']
@@ -137,6 +203,9 @@ function App() {
   })
   const [searchTerm, setSearchTerm] = useState('')
   const [clientSearchTerm, setClientSearchTerm] = useState('')
+  const [editingClient, setEditingClient] = useState<{ originalDocument: string; document: string; name: string; phone: string; address: string } | null>(null)
+  const [clientEditError, setClientEditError] = useState('')
+  const [isSavingClient, setIsSavingClient] = useState(false)
   const [firebaseClients, setFirebaseClients] = useState<RegisteredClient[]>(() => {
     try { return JSON.parse(localStorage.getItem('sastreria-clientes') || '[]') } catch { return [] }
   })
@@ -221,6 +290,11 @@ function App() {
     firebaseClients.forEach(addRegisteredClient)
     contracts.forEach((contract) => addRegisteredClient({ document: contract.document, name: contract.tenant, phone: contract.phone, address: contract.address, updatedAt: contract.createdAt }))
     sales.forEach((sale) => addRegisteredClient({ document: sale.customerDocument, name: sale.customer, phone: sale.customerPhone, address: sale.customerAddress, updatedAt: sale.soldAt }))
+    firebaseClients.filter((client) => client.manuallyEdited).forEach((client) => {
+      const document = String(client.document || '').trim()
+      const previous = clientsByDocument.get(document)
+      if (document) clientsByDocument.set(document, { ...previous, ...client, document, name: client.name?.trim() || previous?.name || 'Cliente sin nombre', phone: client.phone || '', address: client.address || '' })
+    })
 
     return [...clientsByDocument.values()].sort((first, second) => first.name.localeCompare(second.name, 'es'))
   }, [firebaseClients, contracts, sales])
@@ -685,7 +759,7 @@ function App() {
     setIsSaving(false)
     return savedContract
   }
-  const formatContractNumber = (value: number) => `002 - N° ${String(value).padStart(7, '0')}`
+  const formatContractNumber = (value: number) => `${CONTRACT_PREFIX} - N° ${String(value).padStart(7, '0')}`
   const formatDate = (date: string) => date ? new Intl.DateTimeFormat('es-PY', { day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(`${date}T12:00:00`)) : 'Sin definir'
   const guarani = (value: string | number) => {
     const amount = parseAmount(value)
@@ -961,19 +1035,82 @@ function App() {
     pdf.text(`Domicilio: ${form.address || '________________'}`, 77, y)
     pdf.text(`C.I. N° ${form.document || '________________'}`, 156, y)
 
+    let stubTop = Math.max(y + 7, 262)
+    if (stubTop + 30 > 294) {
+      pdf.addPage()
+      stubTop = 14
+    }
+    pdf.setLineDashPattern([2, 1.5], 0)
+    pdf.setLineWidth(0.3)
+    pdf.line(margin, stubTop, pageWidth - margin, stubTop)
+    pdf.setLineDashPattern([], 0)
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(6)
+    pdf.text('- - CORTAR AQUÍ - -', 105, stubTop - 1, { align: 'center' })
+
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(9)
+    pdf.text('COPIA DEL CLIENTE · SASTRERIA VLADIMIR', margin, stubTop + 6)
+    pdf.setFontSize(11)
+    pdf.text(number, pageWidth - margin, stubTop + 6, { align: 'right' })
+
+    const stubRows: [string, string][] = [
+      ['NOMBRE', form.tenant || ''],
+      ['C.I. N°', form.document || ''],
+      ['ARTÍCULOS', rentalEntries.join(', ')],
+      ['RETIRO', formatDate(form.startDate) || ''],
+      ['DEVOLUCIÓN', formatDate(form.endDate) || ''],
+    ]
+    pdf.setFontSize(7)
+    stubRows.forEach(([label, value], index) => {
+      const rowY = stubTop + 12 + index * 4.6
+      pdf.setFont('helvetica', 'bold')
+      pdf.text(label, margin, rowY)
+      pdf.setFont('helvetica', 'normal')
+      pdf.text(pdf.splitTextToSize(value || '__________', 90)[0], margin + 24, rowY)
+    })
+
+    const stubAmounts: [string, string][] = [['TOTAL', guarani(totalAmount)], ['SEÑA', guarani(señaAmount)], ['SALDO', guarani(balanceAmount)]]
+    stubAmounts.forEach(([label, value], index) => {
+      const rowY = stubTop + 12 + index * 4.6
+      pdf.setFont('helvetica', 'bold')
+      pdf.text(label, 140, rowY)
+      pdf.setFont('helvetica', 'normal')
+      pdf.text(value, pageWidth - margin, rowY, { align: 'right' })
+    })
+    pdf.setFont('helvetica', 'italic')
+    pdf.setFontSize(6.2)
+    pdf.text('Presente esta copia al devolver las prendas.', pageWidth - margin, stubTop + 29, { align: 'right' })
+
     pdf.save(`contrato-${String(contractId).padStart(7, '0')}.pdf`)
   }
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    const lockedUntil = readLoginLock()
+    if (lockedUntil) {
+      setLoginError(lockMessage(lockedUntil))
+      return
+    }
     setIsLoggingIn(true)
     setLoginError('')
     try {
       await signIn(login.email.trim(), login.password)
+      localStorage.removeItem(LOGIN_ATTEMPTS_KEY)
+      localStorage.removeItem(LOGIN_LOCK_KEY)
     } catch (error) {
       const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
       if (code === 'auth/invalid-credential' || code === 'auth/user-not-found' || code === 'auth/wrong-password') {
-        setLoginError('Correo o contraseña incorrectos.')
+        const attempts = Number(localStorage.getItem(LOGIN_ATTEMPTS_KEY) || 0) + 1
+        if (attempts >= MAX_LOGIN_ATTEMPTS) {
+          const until = Date.now() + LOGIN_LOCK_MS
+          localStorage.setItem(LOGIN_LOCK_KEY, String(until))
+          localStorage.setItem(LOGIN_ATTEMPTS_KEY, String(attempts))
+          setLoginError(lockMessage(until))
+        } else {
+          localStorage.setItem(LOGIN_ATTEMPTS_KEY, String(attempts))
+          setLoginError(`Correo o contraseña incorrectos. Intentos restantes: ${MAX_LOGIN_ATTEMPTS - attempts}.`)
+        }
       } else if (code === 'auth/too-many-requests') {
         setLoginError('Demasiados intentos. Espera un momento y vuelve a intentar.')
       } else if (code === 'auth/operation-not-allowed') {
@@ -983,6 +1120,44 @@ function App() {
       }
     } finally {
       setIsLoggingIn(false)
+    }
+  }
+
+  const handleSaveClient = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!editingClient) return
+    const name = editingClient.name.trim()
+    const document = editingClient.document.trim()
+    const originalDocument = editingClient.originalDocument
+    if (!name || !document) {
+      setClientEditError('El nombre y la CI son obligatorios.')
+      return
+    }
+    if (document !== originalDocument && registeredClients.some((client) => client.document === document)) {
+      setClientEditError('Ya existe un cliente con esa CI.')
+      return
+    }
+    const updated: RegisteredClient = { document, name, phone: editingClient.phone.trim(), address: editingClient.address.trim(), manuallyEdited: true, updatedAt: new Date().toISOString() }
+    setIsSavingClient(true)
+    setClientEditError('')
+    try {
+      if (firebaseEnabled) await renameClientInFirestore(originalDocument, { document, name: updated.name, phone: updated.phone || '', address: updated.address || '' })
+      const next = [...firebaseClients.filter((client) => client.document !== originalDocument && client.document !== document), updated]
+      setFirebaseClients(next)
+      localStorage.setItem('sastreria-clientes', JSON.stringify(next))
+      if (document !== originalDocument) {
+        const nextContracts = contracts.map((contract) => contract.document === originalDocument ? { ...contract, document } : contract)
+        const nextSales = sales.map((sale) => sale.customerDocument === originalDocument ? { ...sale, customerDocument: document } : sale)
+        setContracts(nextContracts)
+        setSales(nextSales)
+        localStorage.setItem('sastreria-contracts', JSON.stringify(nextContracts))
+        localStorage.setItem('sastreria-sales', JSON.stringify(nextSales))
+      }
+      setEditingClient(null)
+    } catch (error) {
+      setClientEditError(error instanceof Error ? error.message : 'No se pudo guardar el cliente.')
+    } finally {
+      setIsSavingClient(false)
     }
   }
 
@@ -1013,7 +1188,7 @@ function App() {
   }
 
   if (isAuthLoading) return <div className="login-screen" role="status" aria-live="polite"><div className="login-panel"><p>Verificando sesión segura...</p></div></div>
-  if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa con tu cuenta administradora para gestionar contratos y documentos.</p><form onSubmit={(event) => void handleLogin(event)} className="login-form"><label>Correo electrónico<input autoFocus required type="email" autoComplete="username" value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} placeholder="admin@ejemplo.com" /></label><label>Contraseña<input required type="password" autoComplete="current-password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error" role="alert">{loginError}</p>}<button className="primary-button" type="submit" disabled={isLoggingIn || !firebaseEnabled}>{isLoggingIn ? 'Ingresando...' : 'Entrar al sistema'} <span>↗</span></button>{!firebaseEnabled && <p className="login-error" role="alert">Firebase no está configurado. No es posible iniciar sesión.</p>}</form><small className="login-hint">Autenticación segura administrada por Firebase.</small></div></div>
+  if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa con tu cuenta administradora para gestionar contratos y documentos.</p><form onSubmit={(event) => void handleLogin(event)} className="login-form"><label>Correo electrónico<input autoFocus required type="email" autoComplete="username" value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} placeholder="admin@ejemplo.com" /></label><label>Contraseña<input required type="password" autoComplete="current-password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error" role="alert">{loginError}</p>}<button className="primary-button" type="submit" disabled={isLoggingIn || !firebaseEnabled || readLoginLock() > 0}>{isLoggingIn ? 'Ingresando...' : 'Entrar al sistema'} <span>↗</span></button>{!firebaseEnabled && <p className="login-error" role="alert">Firebase no está configurado. No es posible iniciar sesión.</p>}</form><small className="login-hint">Autenticación segura administrada por Firebase.</small></div></div>
 
   return <div className="app-shell" onKeyDown={focusNextFieldOnEnter}>
     <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></header>
@@ -1039,7 +1214,7 @@ function App() {
         <section className="hero-section"><div className="hero-title-row"><h1>Contratos</h1><button type="button" className="hero-contract-count" aria-label={`Ver historial de ${contractSummary.totalContracts} contratos`} title="Ver historial de contratos" onClick={() => navigateTo('history')}><span>REGISTRADOS</span><strong>{contractSummary.totalContracts}</strong></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section>
       </>}
 
-      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO No. {String(contractNumber).padStart(4, '0')} / PASO 0{step}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else navigateTo('review') }}><div className="field-grid">
+      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO {formatContractNumber(contractNumber)}{step > 1 ? ` / PASO 0${step}` : ''}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else navigateTo('review') }}><div className="field-grid">
         {step === 1 && <>
           <label>CI<input required aria-label="CI" value={form.document} onChange={(event) => updateDocument(event.target.value)} onBlur={() => void lookupClient()} placeholder="Ingrese CI" autoComplete="off" />
             {!firebaseEnabled && <small>La búsqueda de clientes requiere Firebase. Puedes completar los datos manualmente.</small>}
@@ -1049,16 +1224,16 @@ function App() {
             {clientLookupStatus === 'error' && <small role="alert">No se pudo consultar el cliente. Verifica la conexión y los permisos de Firebase.</small>}
           </label>
           <label>Nombre completo<input required value={form.tenant} onChange={(event) => update('tenant', event.target.value)} placeholder="Ej. Juan Pérez" /></label>
-          <label>Número de teléfono<input required value={form.phone} onChange={(event) => update('phone', event.target.value)} placeholder="+57 300 000 0000" /></label>
+          <label>Número de teléfono<input required type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={form.phone} onChange={(event) => update('phone', formatParaguayPhone(event.target.value))} placeholder="+595 981234567" /></label>
           <label>Dirección de residencia<input required value={form.address} onChange={(event) => update('address', event.target.value)} placeholder="Calle, número, ciudad" /></label>
-          <label>Inicio del contrato<input required type="date" value={form.startDate} onChange={(event) => update('startDate', event.target.value)} /></label>
-          <label>Fin del contrato<input required type="date" value={form.endDate} onChange={(event) => update('endDate', event.target.value)} /></label>
+          <label>Inicio del contrato<DateInput value={form.startDate} onChange={(iso) => update('startDate', iso)} /></label>
+          <label>Fin del contrato<DateInput value={form.endDate} onChange={(iso) => update('endDate', iso)} /></label>
         </>}
-        {step === 2 && <><fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{form.articles.includes(article) ? '✓' : '+'}</span>{article}</label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>✓</span>{article}</label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset><div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div><label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label><label>Talla<input required value={form.size} onChange={(e) => update('size', e.target.value)} placeholder="Ej. 40R" /></label><label>Color<input required value={form.color} onChange={(e) => update('color', e.target.value)} placeholder="Ej. Negro carbón" /></label><label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label><label className="wide">Observaciones del estado<textarea value={form.notes} onChange={(e) => update('notes', e.target.value)} placeholder="Accesorios incluidos, detalles o condiciones..." /></label></>}
+        {step === 2 && <><fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{form.articles.includes(article) ? '✓' : '+'}</span>{article}</label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>✓</span>{article}</label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset><div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div><label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label><label>Talla<input required value={form.size} onChange={(e) => update('size', e.target.value)} placeholder="Ej. 40R" /></label><label>Color<select required value={form.color} onChange={(e) => update('color', e.target.value)}><option value="">Selecciona un color</option>{[...garmentColors, ...(form.color && !garmentColors.includes(form.color) ? [form.color] : [])].map((color) => <option key={color} value={color}>{color}</option>)}</select></label><label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label><label className="wide">Observaciones del estado<textarea value={form.notes} onChange={(e) => update('notes', e.target.value)} placeholder="Accesorios incluidos, detalles o condiciones..." /></label></>}
         {step === 3 && <><label className="toggle wide"><input type="checkbox" checked={form.promissoryNote} onChange={(e) => update('promissoryNote', e.target.checked)} /><span className="checkmark">✓</span><span><b>Incluir pagaré automático</b><small>Se generará por {money(promissoryValue)} (5 × {money(totalAmount)}).</small></span></label><label className="wide">Restricciones y condiciones<textarea value={form.restrictions} onChange={(e) => update('restrictions', e.target.value)} placeholder="Ej. Entregar limpio y sin modificaciones..." /></label></>}
       </div><div className="form-actions">{step > 1 && <button type="button" className="secondary-button" onClick={() => setStep(step - 1)}>← Atrás</button>}<button type="submit" className="primary-button">{step < 3 ? 'Continuar' : 'Revisar contrato'} <span>↗</span></button></div></form></div></section>}
 
-      {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO No. {String(form.contractNumber || contractNumber).padStart(4, '0')}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
+      {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
 
       {view === 'sales' && <section className="workspace">
         <div className="workspace-heading"><div><p className="eyebrow">VENTAS / {dateLabel.toUpperCase()}</p><h2>Registrar venta</h2></div><button className="text-button" onClick={() => navigateTo('cash')}>Ir a Caja ↗</button></div>
@@ -1069,7 +1244,7 @@ function App() {
             <label>CI del comprador<input required value={saleForm.customerDocument} onChange={(event) => { saleClientLookupSequence.current += 1; setSaleClientLookupStatus('idle'); setSaleForm({ ...saleForm, customerDocument: event.target.value, customer: '', customerPhone: '', customerAddress: '' }) }} onBlur={() => void lookupSaleClient()} placeholder="Ingrese CI" autoComplete="off" />{saleClientLookupStatus === 'loading' && <small role="status">Buscando en Firebase...</small>}{saleClientLookupStatus === 'found' && <small role="status">Cliente encontrado en Firebase.</small>}{saleClientLookupStatus === 'not-found' && <small role="status">Cliente nuevo; quedará registrado al guardar la venta.</small>}{saleClientLookupStatus === 'error' && <small role="alert">No se pudo consultar Firebase. Verifica la conexión.</small>}</label>
             <label>Nombre del comprador<input required value={saleForm.customer} onChange={(event) => setSaleForm({ ...saleForm, customer: event.target.value })} placeholder="Nombre y apellido" />{saleClientLookupStatus === 'not-found' && <small>Se guardará en el directorio junto con la venta.</small>}</label>
             {saleClientLookupStatus === 'not-found' && <>
-              <label>Teléfono del comprador (opcional)<input type="tel" value={saleForm.customerPhone} onChange={(event) => setSaleForm({ ...saleForm, customerPhone: event.target.value })} placeholder="Número de teléfono" /></label>
+              <label>Teléfono del comprador (opcional)<input type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={saleForm.customerPhone} onChange={(event) => setSaleForm({ ...saleForm, customerPhone: formatParaguayPhone(event.target.value) })} placeholder="+595 981234567" /></label>
               <label>Dirección del comprador (opcional)<input value={saleForm.customerAddress} onChange={(event) => setSaleForm({ ...saleForm, customerAddress: event.target.value })} placeholder="Dirección" /></label>
             </>}
             <label>Producto<select required value={saleForm.productId} onChange={(event) => { const product = products.find((item) => item.id === event.target.value); setSaleForm({ ...saleForm, productId: event.target.value, unitPrice: String(product?.price || 0) }) }}>{products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}</select></label>
@@ -1105,7 +1280,7 @@ function App() {
         </>}
       </section>}
 
-      {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{String(contract.contractNumber || index + 1).padStart(4, '0')}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
+      {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{formatContractNumber(contract.contractNumber || index + 1)}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
       {view === 'form' && step === 2 && <section className="workspace payment-method-section"><div className="cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div></section>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
@@ -1126,7 +1301,7 @@ function App() {
           <div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setIsCashWithdrawalDialogOpen(false)} disabled={isSavingCashWithdrawal}>Cancelar</button><button type="submit" className="save-button" disabled={isSavingCashWithdrawal}>{isSavingCashWithdrawal ? 'Registrando...' : 'Registrar retiro'}</button></div>
         </form>
       </section></div>}
-      {view === 'clients' && <section className="workspace clients-workspace"><div className="workspace-heading"><div><p className="eyebrow">DIRECTORIO / {registeredClients.length} CLIENTES</p><h2>Clientes registrados</h2></div></div><div className="history-toolbar"><input className="search-input" value={clientSearchTerm} onChange={(event) => setClientSearchTerm(event.target.value)} placeholder="Buscar por nombre, CI, teléfono o dirección" /><span className="history-summary">{filteredClients.length} resultados</span></div>{filteredClients.length === 0 ? <div className="empty-state compact-empty"><span>⌕</span><h3>{registeredClients.length === 0 ? 'Aún no hay clientes registrados' : 'No hay coincidencias'}</h3><p>{registeredClients.length === 0 ? 'Los clientes aparecerán aquí al guardar contratos o ventas con CI.' : 'Prueba otro nombre o número de documento.'}</p></div> : <div className="client-list">{filteredClients.map((client) => <article className="client-row" key={client.document}><span className="client-monogram">{client.name.charAt(0).toUpperCase()}</span><span className="client-primary"><strong>{client.name}</strong><small>CI {client.document}</small></span><span className="client-detail">{client.phone || 'Teléfono no registrado'}</span><span className="client-detail">{client.address || 'Dirección no registrada'}</span><span className="client-updated">{client.updatedAt ? `ACTUALIZADO ${formatDateTime24(client.updatedAt)}` : 'REGISTRADO'}</span></article>)}</div>}</section>}
+      {view === 'clients' && <section className="workspace clients-workspace"><div className="workspace-heading"><div><p className="eyebrow">DIRECTORIO / {registeredClients.length} CLIENTES</p><h2>Clientes registrados</h2></div></div><div className="history-toolbar"><input className="search-input" value={clientSearchTerm} onChange={(event) => setClientSearchTerm(event.target.value)} placeholder="Buscar por nombre, CI, teléfono o dirección" /><span className="history-summary">{filteredClients.length} resultados</span></div>{filteredClients.length === 0 ? <div className="empty-state compact-empty"><span>⌕</span><h3>{registeredClients.length === 0 ? 'Aún no hay clientes registrados' : 'No hay coincidencias'}</h3><p>{registeredClients.length === 0 ? 'Los clientes aparecerán aquí al guardar contratos o ventas con CI.' : 'Prueba otro nombre o número de documento.'}</p></div> : <div className="client-list">{filteredClients.map((client) => <article className="client-row" key={client.document}><span className="client-monogram">{client.name.charAt(0).toUpperCase()}</span><span className="client-primary"><strong>{client.name} <button type="button" className="client-edit-button" onClick={() => { setClientEditError(''); setEditingClient({ originalDocument: client.document, document: client.document, name: client.name, phone: client.phone || '', address: client.address || '' }) }}>Editar ✎</button></strong><small>CI {client.document}</small></span><span className="client-detail">{client.phone || 'Teléfono no registrado'}</span><span className="client-detail">{client.address || 'Dirección no registrada'}</span><span className="client-updated">{client.updatedAt ? `ACTUALIZADO ${formatDateTime24(client.updatedAt)}` : 'REGISTRADO'}</span></article>)}</div>}{editingClient && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-client-title"><div className="cash-modal"><h2 id="edit-client-title">Editar cliente</h2><form onSubmit={(event) => void handleSaveClient(event)}><label>CI<input autoFocus required inputMode="numeric" value={editingClient.document} onChange={(event) => setEditingClient({ ...editingClient, document: event.target.value })} /></label><label>Nombre completo<input required value={editingClient.name} onChange={(event) => setEditingClient({ ...editingClient, name: event.target.value })} /></label><label>Número de teléfono<input type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={editingClient.phone} onChange={(event) => setEditingClient({ ...editingClient, phone: formatParaguayPhone(event.target.value) })} placeholder="+595 981234567" /></label><label>Dirección<input value={editingClient.address} onChange={(event) => setEditingClient({ ...editingClient, address: event.target.value })} /></label>{clientEditError && <p className="login-error" role="alert">{clientEditError}</p>}<div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setEditingClient(null)}>Cancelar</button><button type="submit" className="primary-button" disabled={isSavingClient}>{isSavingClient ? 'Guardando...' : 'Guardar cambios'}</button></div></form></div></div>}</section>}
     </main><footer><div className="footer-brand"><strong>SASTRERÍA VLADIMIR</strong><span>DESDE 2012 <i>·</i> ELEGANCIA QUE DEJA HUELLA</span></div></footer>
   </div>
 }
