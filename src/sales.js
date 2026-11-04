@@ -10,6 +10,11 @@ export const defaultProducts = [
   { id: 'corbata', name: 'Corbata', price: 50000 },
   { id: 'chaleco', name: 'Chaleco', price: 120000 },
   { id: 'pantalon-solo', name: 'Pantalón solo', price: 180000 },
+  { id: 'compostura', name: 'Compostura', price: 0 },
+  { id: 'confeccion-a-medida', name: 'Confección a medida', price: 0 },
+  { id: 'tirantes', name: 'Tirantes', price: 0 },
+  { id: 'gemelos', name: 'Gemelos', price: 0 },
+  { id: 'sujeta-corbata', name: 'Sujeta corbata', price: 0 },
 ];
 
 export const paymentMethods = ['Tarjeta de crédito', 'Tarjeta de débito', 'Efectivo', 'Transferencia'];

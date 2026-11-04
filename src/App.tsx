@@ -141,6 +141,7 @@ type RegisteredClient = {
 }
 
 const catalog = ['Traje', 'Camisa', 'Corbata', 'Zapato', 'Cinto']
+const garmentSizes = ['40', '42', '44', '46', '48', '50', '52', '54', '56', '58', '60', '62', 'Talle niño', 'Talle especial']
 const emptyContract: ContractForm = {
   tenant: '', address: '', document: '', phone: '', startDate: '', endDate: '',
   articles: [], articlePrices: {}, suit: '', size: '', color: '', totalValue: '', depositValue: '', notes: '',
@@ -185,6 +186,8 @@ function App() {
   const [isCashWithdrawalDialogOpen, setIsCashWithdrawalDialogOpen] = useState(false)
   const [isSavingCashWithdrawal, setIsSavingCashWithdrawal] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null)
+  const pdfFrameRef = useRef<HTMLIFrameElement>(null)
   const [newArticle, setNewArticle] = useState('')
   const [printedContractNumber, setPrintedContractNumber] = useState<number | null>(null)
   const [view, setViewState] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'sales' | 'clients'>('home')
@@ -879,7 +882,7 @@ function App() {
       setSaleForm(saleDefaultForm)
       saleClientLookupSequence.current += 1
       setSaleClientLookupStatus('idle')
-      setSaleSuccess('Venta guardada. El cliente quedó registrado en el directorio.')
+      setSaleSuccess('Guardado con éxito')
     } catch (error) {
       setCashError(error instanceof Error ? error.message : 'No se pudo guardar la venta.')
     } finally {
@@ -895,34 +898,41 @@ function App() {
     const savedContract = await saveContract(true)
     if (savedContract) await downloadPdf(savedContract)
   }
+  const finishContract = async () => {
+    const savedContract = await saveContract()
+    if (savedContract) await downloadPdf(savedContract)
+  }
   const downloadPdf = async (savedContract?: Contract) => {
     const { jsPDF } = await import('jspdf')
-    const pdf = new jsPDF({ format: 'a4', unit: 'mm' })
     const contractId = savedContract?.contractNumber || reservePrintedNumber()
     const number = formatContractNumber(contractId)
     const pageWidth = 210
     const margin = 10
     const contentWidth = pageWidth - margin * 2
+
+    const buildPdf = (scale: number) => {
+    const pdf = new jsPDF({ format: 'a4', unit: 'mm' })
     let y = 14
 
     const writeParagraph = (text: string, size = 7.2) => {
+      const fontSize = size * scale
       pdf.setFont('helvetica', 'normal')
-      pdf.setFontSize(size)
+      pdf.setFontSize(fontSize)
       const lines = pdf.splitTextToSize(text, contentWidth)
       pdf.text(lines, margin, y)
-      y += lines.length * (size * 0.48) + 2.5
+      y += lines.length * (fontSize * 0.48) + 2.5 * scale
     }
 
     const writeClause = (label: string, text: string) => {
-      const labelWidth = pdf.getTextWidth(label)
       pdf.setFont('helvetica', 'bold')
-      pdf.setFontSize(7.2)
+      pdf.setFontSize(7.2 * scale)
+      const labelWidth = pdf.getTextWidth(label)
       pdf.text(label, margin, y)
       pdf.line(margin + labelWidth, y + 0.8, margin + labelWidth + 1.5, y + 0.8)
       pdf.setFont('helvetica', 'normal')
       const rest = pdf.splitTextToSize(text, contentWidth - labelWidth - 10)
       pdf.text(rest, margin + labelWidth + 5, y)
-      y += Math.max(rest.length, 1) * 3.25 + 2.2
+      y += Math.max(rest.length, 1) * 3.25 * scale + 2.2 * scale
     }
 
     pdf.setTextColor(0, 0, 0)
@@ -949,8 +959,8 @@ function App() {
     writeClause('SEPTIMA:', 'EL CLIENTE no podrá dar en uso o subarrendar la(s) prenda(s) y/o accesorios objeto del alquiler descritos en el presente contrato a terceras personas bajo ninguna circunstancia.')
     writeClause('OCTAVA:', 'SASTRERIA VLADIMIR tendrá derecho a ejercer acciones legales, civiles, mercantiles o penales pertinentes contra EL CLIENTE, en caso de que no devuelva la(s) prenda(s) y/o accesorios, en el término pactado en este contrato.')
     writeClause('NOVENA:', 'EL CLIENTE está de acuerdo con el término y condiciones de la SASTRERIA VLADIMIR para el alquiler de prendas y accesorios.')
+    writeClause('DECIMA:', 'El cliente declara estar en conocimiento y aceptar que las señas y/o anticipos abonados a SASTRERÍA VLADIMIR no son reembolsables, ya que los mismos se consideran pagos destinados a cubrir los trabajos realizados, la mano de obra, los materiales utilizados y los gastos derivados de la confección, modificación o preparación de la prenda solicitada. En caso de cancelación unilateral del pedido por parte del cliente, los importes abonados quedarán a favor de SASTRERÍA VLADIMIR en concepto de compensación por los trabajos y gastos incurridos.')
 
-    writeParagraph('El presente contrato ha sido convenido en la ciudad de Luque, siendo el día ........ del mes de ........ del 202......')
 
     const clientX = margin
     const orderX = 110
@@ -1082,7 +1092,25 @@ function App() {
     pdf.setFontSize(6.2)
     pdf.text('Presente esta copia al devolver las prendas.', pageWidth - margin, stubTop + 29, { align: 'right' })
 
-    pdf.save(`contrato-${String(contractId).padStart(7, '0')}.pdf`)
+    return pdf
+    }
+
+    let finalPdf = buildPdf(1)
+    for (let scale = 0.96; finalPdf.getNumberOfPages() > 1 && scale >= 0.7; scale -= 0.04) finalPdf = buildPdf(scale)
+
+    const filename = `contrato-${String(contractId).padStart(7, '0')}.pdf`
+    setPdfPreview((current) => {
+      if (current) URL.revokeObjectURL(current.url)
+      return { url: URL.createObjectURL(finalPdf.output('blob')), filename }
+    })
+  }
+  const closePdfPreview = () => setPdfPreview((current) => {
+    if (current) URL.revokeObjectURL(current.url)
+    return null
+  })
+  const printPdfPreview = () => {
+    const frame = pdfFrameRef.current?.contentWindow
+    if (frame) { frame.focus(); frame.print() }
   }
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
@@ -1214,7 +1242,7 @@ function App() {
         <section className="hero-section"><div className="hero-title-row"><h1>Contratos</h1><button type="button" className="hero-contract-count" aria-label={`Ver historial de ${contractSummary.totalContracts} contratos`} title="Ver historial de contratos" onClick={() => navigateTo('history')}><span>REGISTRADOS</span><strong>{contractSummary.totalContracts}</strong></button></div><div className="hero-figure"><div className="figure-label">ATELIER / 24</div><div className="suit-silhouette"><div className="lapel left" /><div className="lapel right" /><div className="shirt" /><div className="tie" /></div><div className="figure-caption">ORDEN · PRECISIÓN · ESTILO</div></div></section>
       </>}
 
-      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO {formatContractNumber(contractNumber)}{step > 1 ? ` / PASO 0${step}` : ''}</p><h2>{step === 1 ? 'Datos del arrendatario' : step === 2 ? 'Artículos y valor' : 'Pagaré y restricciones'}</h2></div><button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /><span className={step >= 3 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 3) setStep(step + 1); else navigateTo('review') }}><div className="field-grid">
+      {view === 'form' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">CONTRATO {formatContractNumber(contractNumber)}{step > 1 ? ` / PASO 0${step}` : ''}</p><h2>{step === 1 ? 'Datos del arrendatario' : 'Artículos y valor'}</h2></div><button className="text-button" onClick={() => navigateTo('home')}>Cerrar ×</button></div><div className="progress"><span className="active" /><span className={step >= 2 ? 'active' : ''} /></div><div className="form-card"><form onSubmit={(event) => { event.preventDefault(); if (step < 2) setStep(step + 1); else void finishContract() }}><div className="field-grid">
         {step === 1 && <>
           <label>CI<input required aria-label="CI" value={form.document} onChange={(event) => updateDocument(event.target.value)} onBlur={() => void lookupClient()} placeholder="Ingrese CI" autoComplete="off" />
             {!firebaseEnabled && <small>La búsqueda de clientes requiere Firebase. Puedes completar los datos manualmente.</small>}
@@ -1229,9 +1257,16 @@ function App() {
           <label>Inicio del contrato<DateInput value={form.startDate} onChange={(iso) => update('startDate', iso)} /></label>
           <label>Fin del contrato<DateInput value={form.endDate} onChange={(iso) => update('endDate', iso)} /></label>
         </>}
-        {step === 2 && <><fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{form.articles.includes(article) ? '✓' : '+'}</span>{article}</label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>✓</span>{article}</label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset><div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div><label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label><label>Talla<input required value={form.size} onChange={(e) => update('size', e.target.value)} placeholder="Ej. 40R" /></label><label>Color<select required value={form.color} onChange={(e) => update('color', e.target.value)}><option value="">Selecciona un color</option>{[...garmentColors, ...(form.color && !garmentColors.includes(form.color) ? [form.color] : [])].map((color) => <option key={color} value={color}>{color}</option>)}</select></label><label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label><label className="wide">Observaciones del estado<textarea value={form.notes} onChange={(e) => update('notes', e.target.value)} placeholder="Accesorios incluidos, detalles o condiciones..." /></label></>}
-        {step === 3 && <><label className="toggle wide"><input type="checkbox" checked={form.promissoryNote} onChange={(e) => update('promissoryNote', e.target.checked)} /><span className="checkmark">✓</span><span><b>Incluir pagaré automático</b><small>Se generará por {money(promissoryValue)} (5 × {money(totalAmount)}).</small></span></label><label className="wide">Restricciones y condiciones<textarea value={form.restrictions} onChange={(e) => update('restrictions', e.target.value)} placeholder="Ej. Entregar limpio y sin modificaciones..." /></label></>}
-      </div><div className="form-actions">{step > 1 && <button type="button" className="secondary-button" onClick={() => setStep(step - 1)}>← Atrás</button>}<button type="submit" className="primary-button">{step < 3 ? 'Continuar' : 'Revisar contrato'} <span>↗</span></button></div></form></div></section>}
+        {step === 2 && <>
+          <fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{article}</span></label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>{article}</span></label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset>
+          <div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div>
+          <div className="wide cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div>
+          <label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label>
+          <label>Color<select required value={form.color} onChange={(e) => update('color', e.target.value)}><option value="">Selecciona un color</option>{[...garmentColors, ...(form.color && !garmentColors.includes(form.color) ? [form.color] : [])].map((color) => <option key={color} value={color}>{color}</option>)}</select></label>
+          <label>Talla<select required value={form.size} onChange={(e) => update('size', e.target.value)}><option value="">Selecciona un talle</option>{garmentSizes.map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
+          <label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label>
+        </>}
+      </div>{saveError && <p className="login-error" role="alert">{saveError}</p>}<div className="form-actions">{step > 1 && <button type="button" className="secondary-button" onClick={() => setStep(step - 1)}>← Atrás</button>}<button type="submit" className="primary-button" disabled={isSaving}>{step < 2 ? 'Continuar' : isSaving ? 'Guardando...' : 'Guardar contrato'} <span>↗</span></button></div></form></div></section>}
 
       {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
 
@@ -1281,7 +1316,7 @@ function App() {
       </section>}
 
       {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{formatContractNumber(contract.contractNumber || index + 1)}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
-      {view === 'form' && step === 2 && <section className="workspace payment-method-section"><div className="cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div></section>}
+      {pdfPreview && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-label="Vista previa del contrato"><section className="pdf-preview-modal"><div className="pdf-preview-bar"><strong>Vista previa del contrato · A4</strong><div className="pdf-preview-actions"><button type="button" className="primary-button" onClick={printPdfPreview}>Imprimir A4</button><a className="secondary-button" href={pdfPreview.url} download={pdfPreview.filename}>Descargar PDF</a><button type="button" className="secondary-button" onClick={closePdfPreview}>Cerrar ×</button></div></div><iframe ref={pdfFrameRef} className="pdf-preview-frame" src={pdfPreview.url} title="Vista previa del contrato" /></section></div>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
         {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
