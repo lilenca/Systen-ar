@@ -87,6 +87,33 @@ test('cash reconciliation isolates multiple sessions opened on the same day', ()
   assert.deepEqual(secondCash.entries.map((entry) => entry.concept), ['Seña de alquiler', 'Corbata']);
 });
 
+test('cash reconciliation includes movements from previous days in the same open cash session', () => {
+  const sales = [
+    { id: 'yesterday-sale', cashSessionId: 'session-1', productName: 'Camisa', quantity: 1, unitPrice: 100000, soldAt: '2026-09-28T20:00:00.000Z' },
+    { id: 'today-sale', cashSessionId: 'session-1', productName: 'Corbata', quantity: 1, unitPrice: 50000, soldAt: '2026-09-29T09:00:00.000Z' },
+    { id: 'other-session-sale', cashSessionId: 'session-2', productName: 'Zapato', quantity: 1, unitPrice: 200000, soldAt: '2026-09-28T21:00:00.000Z' },
+  ];
+  const contracts = [
+    { id: 'yesterday-contract', cashSessionId: 'session-1', tenant: 'Ana', depositValue: '20000', depositPaymentMethod: 'Efectivo', createdAt: '2026-09-28T20:30:00.000Z' },
+  ];
+
+  const result = buildCashReconciliation(sales, contracts, '2026-09-29', 'session-1', 1);
+  assert.equal(result.totalAmount, 170000);
+  assert.deepEqual(result.entries.map((entry) => entry.id), ['today-sale', 'contract-yesterday-contract', 'yesterday-sale']);
+});
+
+test('legacy movements without a session belong only to the first cash session on its opening date', () => {
+  const sales = [
+    { id: 'legacy-opening', quantity: 1, unitPrice: 100, soldAt: '2026-09-28T15:00:00.000Z' },
+    { id: 'legacy-next-day', quantity: 1, unitPrice: 200, soldAt: '2026-09-29T15:00:00.000Z' },
+    { id: 'current', cashSessionId: 'session-1', quantity: 1, unitPrice: 300, soldAt: '2026-09-29T15:00:00.000Z' },
+  ];
+
+  assert.equal(buildCashReconciliation(sales, [], '2026-09-28', 'session-1', 1).totalAmount, 400);
+  assert.equal(buildCashReconciliation(sales, [], '2026-09-28', 'session-2', 2).totalAmount, 0);
+  assert.equal(buildCashReconciliation(sales, [], '2026-09-28').totalAmount, 100);
+});
+
 test('a multi-item sale totals every product as one cash movement', () => {
   const sale = {
     id: 'multi-item-sale',

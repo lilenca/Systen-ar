@@ -62,6 +62,7 @@ export type DailyCashSession = {
   status: 'open' | 'closed'
   openingBalance: number
   openedAt: string
+  continuesAcrossDays?: boolean
   closedAt?: string
   countedCash?: number
   expectedCash?: number
@@ -90,12 +91,13 @@ function cacheCashSession(session: DailyCashSession) {
   localStorage.removeItem(legacyLocalCashSessionKey(session.dateKey))
 }
 
-function getCachedOpenCashSession(dateKey: string): DailyCashSession | null {
+function getCachedOpenCashSession(dateKey?: string): DailyCashSession | null {
   const cached = getCachedCashSessions()
-    .filter((session) => session.dateKey === dateKey && session.status === 'open')
-    .sort((first, second) => second.sessionNumber - first.sessionNumber)[0]
+    .filter((session) => (!dateKey || session.dateKey === dateKey) && session.status === 'open')
+    .sort((first, second) => (second.openedAt || '').localeCompare(first.openedAt || ''))[0]
   if (cached) return cached
 
+  if (!dateKey) return null
   try {
     const legacy = JSON.parse(localStorage.getItem(legacyLocalCashSessionKey(dateKey)) || 'null') as Partial<DailyCashSession> | null
     if (legacy?.status !== 'open') return null
@@ -106,7 +108,16 @@ function getCachedOpenCashSession(dateKey: string): DailyCashSession | null {
 }
 
 export async function loadDailyCashSession(dateKey: string): Promise<DailyCashSession | null> {
-  if (!firestore) return getCachedOpenCashSession(dateKey)
+  if (!firestore) {
+    const active = getCachedCashSessions()
+      .filter((session) => session.status === 'open' && (session.continuesAcrossDays || session.dateKey === dateKey))
+      .sort((first, second) => (second.openedAt || '').localeCompare(first.openedAt || ''))[0]
+      || getCachedOpenCashSession(dateKey)
+    if (!active) return null
+    const session = { ...active, continuesAcrossDays: true }
+    cacheCashSession(session)
+    return session
+  }
 
   const sessionsSnapshot = await getDocs(query(collection(firestore, 'cajas'), where('dateKey', '==', dateKey)))
   const sessions = sessionsSnapshot.docs.map((snapshot) => ({
@@ -116,18 +127,33 @@ export async function loadDailyCashSession(dateKey: string): Promise<DailyCashSe
     sessionNumber: Number(snapshot.data().sessionNumber || 1),
   })) as DailyCashSession[]
   sessions.forEach(cacheCashSession)
-  const activeSession = sessions
-    .filter((session) => session.status === 'open')
-    .sort((first, second) => second.sessionNumber - first.sessionNumber)[0]
-  if (activeSession) return activeSession
+  const todaySession = sessions.filter((session) => session.status === 'open')
+    .sort((first, second) => (second.openedAt || '').localeCompare(first.openedAt || ''))[0]
+  const activePointerRef = doc(firestore, 'configuracion', 'caja-activa')
+  const dailyPointerRef = doc(firestore, 'configuracion', `caja-activa-${dateKey}`)
+  const activeSession = await runTransaction(firestore, async (transaction) => {
+    const [pointer, dailyPointer] = await Promise.all([
+      transaction.get(activePointerRef),
+      transaction.get(dailyPointerRef),
+    ])
+    const activeId = pointer.exists()
+      ? pointer.data().sessionId
+      : dailyPointer.exists() ? dailyPointer.data().sessionId : todaySession?.id
+    if (typeof activeId !== 'string') {
+      if (!pointer.exists()) transaction.set(activePointerRef, { sessionId: null })
+      return null
+    }
 
-  const legacySession = getCachedOpenCashSession(dateKey)
-  if (legacySession) {
-    await setDoc(doc(firestore, 'cajas', legacySession.id), legacySession, { merge: true })
-    cacheCashSession(legacySession)
-    return legacySession
-  }
-  return null
+    const activeSnapshot = await transaction.get(doc(firestore!, 'cajas', activeId))
+    if (!activeSnapshot.exists() || activeSnapshot.data().status !== 'open') {
+      transaction.set(activePointerRef, { sessionId: null })
+      return null
+    }
+    if (!pointer.exists()) transaction.set(activePointerRef, { sessionId: activeId })
+    return { ...activeSnapshot.data(), id: activeId, sessionNumber: Number(activeSnapshot.data().sessionNumber || 1) } as DailyCashSession
+  })
+  if (activeSession) cacheCashSession(activeSession)
+  return activeSession
 }
 
 export async function openDailyCashSession(dateKey: string, openingBalance: number): Promise<DailyCashSession> {
@@ -143,18 +169,19 @@ export async function openDailyCashSession(dateKey: string, openingBalance: numb
     ]
     const firstAvailableSessionNumber = Math.max(0, ...storedSessionNumbers) + 1
     const session = await runTransaction(firestore, async (transaction) => {
+      const activePointerRef = doc(firestore!, 'configuracion', 'caja-activa')
       const pointerRef = doc(firestore, 'configuracion', `caja-activa-${dateKey}`)
       const counterRef = doc(firestore, 'configuracion', `caja-contador-${dateKey}`)
-      const [pointerSnapshot, counterSnapshot] = await Promise.all([
-        transaction.get(pointerRef),
+      const [activePointerSnapshot, counterSnapshot] = await Promise.all([
+        transaction.get(activePointerRef),
         transaction.get(counterRef),
       ])
-      const activeId = pointerSnapshot.data()?.sessionId
+      const activeId = activePointerSnapshot.data()?.sessionId
       if (typeof activeId === 'string') {
         const activeRef = doc(firestore, 'cajas', activeId)
         const activeSnapshot = await transaction.get(activeRef)
         if (activeSnapshot.exists() && activeSnapshot.data().status === 'open') {
-          return { ...activeSnapshot.data(), id: activeId, dateKey } as DailyCashSession
+          return { ...activeSnapshot.data(), id: activeId } as DailyCashSession
         }
       }
       const sessionNumber = Math.max(Number(counterSnapshot.data()?.nextNumber || 1), firstAvailableSessionNumber)
@@ -164,6 +191,7 @@ export async function openDailyCashSession(dateKey: string, openingBalance: numb
       transaction.set(sessionRef, openedSession)
       transaction.set(counterRef, { nextNumber: sessionNumber + 1 }, { merge: true })
       transaction.set(pointerRef, { dateKey, sessionId: id }, { merge: true })
+      transaction.set(activePointerRef, { sessionId: id })
       return openedSession
     })
     cacheCashSession(session)
@@ -172,7 +200,7 @@ export async function openDailyCashSession(dateKey: string, openingBalance: numb
 
   const sessions = getCachedCashSessions().filter((item) => item.dateKey === dateKey)
   const sessionNumber = sessions.reduce((next, item) => Math.max(next, item.sessionNumber + 1), 1)
-  const session: DailyCashSession = { id: `${dateKey}-${String(sessionNumber).padStart(3, '0')}`, dateKey, sessionNumber, status: 'open', openingBalance, openedAt }
+  const session: DailyCashSession = { id: `${dateKey}-${String(sessionNumber).padStart(3, '0')}`, dateKey, sessionNumber, status: 'open', openingBalance, openedAt, continuesAcrossDays: true }
   cacheCashSession(session)
   return session
 }
@@ -219,9 +247,11 @@ export async function closeDailyCashSession(
   if (firestore && sessionRef) {
     const session = await runTransaction(firestore, async (transaction) => {
       const pointerRef = doc(firestore, 'configuracion', `caja-activa-${sessionToClose.dateKey}`)
-      const [snapshot, pointerSnapshot] = await Promise.all([
+      const activePointerRef = doc(firestore, 'configuracion', 'caja-activa')
+      const [snapshot, pointerSnapshot, activePointerSnapshot] = await Promise.all([
         transaction.get(sessionRef),
         transaction.get(pointerRef),
+        transaction.get(activePointerRef),
       ])
       if (!snapshot.exists()) throw new Error('Todavía no se abrió la caja de hoy.')
       const current = { ...snapshot.data(), id: sessionToClose.id, dateKey: sessionToClose.dateKey } as DailyCashSession
@@ -230,6 +260,9 @@ export async function closeDailyCashSession(
       transaction.set(sessionRef, closedSession)
       if (pointerSnapshot.data()?.sessionId === sessionToClose.id) {
         transaction.set(pointerRef, { dateKey: sessionToClose.dateKey, sessionId: null }, { merge: true })
+      }
+      if (activePointerSnapshot.data()?.sessionId === sessionToClose.id) {
+        transaction.set(activePointerRef, { sessionId: null })
       }
       return closedSession
     })
@@ -295,13 +328,14 @@ export async function loadBusinessData(
   fallbackSales: Array<Record<string, unknown>>,
   fallbackContracts: Array<Record<string, unknown>>,
 ) {
-  if (!firestore) return { products: fallbackProducts, sales: fallbackSales, contracts: fallbackContracts, cashMovements: [] }
+  if (!firestore) return { products: fallbackProducts, sales: fallbackSales, contracts: fallbackContracts, cashMovements: [], clients: [], nextContractNumber: 1 }
 
-  const [salesSnapshot, contractsSnapshot, cashSnapshot, clientsSnapshot] = await Promise.all([
+  const [salesSnapshot, contractsSnapshot, cashSnapshot, clientsSnapshot, counterSnapshot] = await Promise.all([
     getDocs(collection(firestore, 'ventas')),
     getDocs(collection(firestore, 'contratos')),
     getDocs(collection(firestore, 'caja')),
     getDocs(collection(firestore, 'clientes')).catch(() => null),
+    getDoc(doc(firestore, 'configuracion', 'contratos')),
   ])
 
   const sales: Array<Record<string, unknown>> = salesSnapshot.empty
@@ -338,7 +372,11 @@ export async function loadBusinessData(
   }
 
   await saveDocuments(documentsToSave)
-  return { products: fallbackProducts, sales, contracts, cashMovements, clients }
+  const nextContractNumber = Math.max(
+    Number(counterSnapshot.data()?.nextNumber) || 1,
+    ...contracts.map((contract) => (Number(contract.contractNumber) || 0) + 1),
+  )
+  return { products: fallbackProducts, sales, contracts, cashMovements, clients, nextContractNumber }
 }
 
 export async function findClientByDocument(document: string) {
@@ -360,7 +398,7 @@ export async function updateClientInFirestore(client: { document: string; name: 
   if (!firestore) return
   const updatedAt = new Date().toISOString()
   await setDoc(doc(firestore, 'clientes', client.document.trim()), {
-    name: client.name,
+    name: client.name.trim().toLocaleUpperCase('es'),
     document: client.document.trim(),
     phone: client.phone,
     address: client.address,
@@ -389,7 +427,7 @@ export async function renameClientInFirestore(oldDocument: string, client: { doc
   ])
 
   const batch = writeBatch(firestore)
-  batch.set(doc(firestore, 'clientes', to), { name: client.name, document: to, phone: client.phone, address: client.address, manuallyEdited: true, updatedAt })
+  batch.set(doc(firestore, 'clientes', to), { name: client.name.trim().toLocaleUpperCase('es'), document: to, phone: client.phone, address: client.address, manuallyEdited: true, updatedAt })
   batch.delete(doc(firestore, 'clientes', from))
   contractsSnapshot.docs.forEach((snapshot) => batch.update(snapshot.ref, { document: to }))
   salesSnapshot.docs.forEach((snapshot) => batch.update(snapshot.ref, { customerDocument: to }))
@@ -406,12 +444,16 @@ export async function saveContractToFirestore(contract: Record<string, unknown>)
 
   return runTransaction(firestore, async (transaction) => {
     const counterSnapshot = await transaction.get(counterRef)
-    const nextNumber = Number(counterSnapshot.data()?.nextNumber || 1)
-    const savedContract = { ...contract, contractNumber: nextNumber }
+    const nextNumber = Math.max(Number(counterSnapshot.data()?.nextNumber) || 1, Number(contract.contractNumber) || 1)
+    const savedContract = {
+      ...contract,
+      tenant: typeof contract.tenant === 'string' ? contract.tenant.trim().toLocaleUpperCase('es') : '',
+      contractNumber: nextNumber,
+    }
 
     transaction.set(counterRef, { nextNumber: nextNumber + 1 }, { merge: true })
     transaction.set(clientRef, {
-      name: contract.tenant,
+      name: savedContract.tenant,
       document: contract.document,
       phone: contract.phone,
       address: contract.address,
@@ -442,14 +484,18 @@ export async function saveSaleToFirestore(
       customerRef ? transaction.get(customerRef) : Promise.resolve(null),
     ])
     const nextReceiptNumber = Number(receiptCounterSnapshot.data()?.nextNumber || 1)
-    const savedSale = { ...sale, receiptNumber: `REC-${String(nextReceiptNumber).padStart(7, '0')}` }
+    const savedSale = {
+      ...sale,
+      customer: typeof sale.customer === 'string' ? sale.customer.trim().toLocaleUpperCase('es') : '',
+      receiptNumber: `REC-${String(nextReceiptNumber).padStart(7, '0')}`,
+    }
     transaction.set(receiptCounterRef, { nextNumber: nextReceiptNumber + 1 }, { merge: true })
     transaction.set(saleRef, savedSale)
     transaction.set(cashRef, saleMovement(savedSale))
     if (customerRef && customerDocument) {
       const existingCustomer = customerSnapshot?.data()
       const customerName = typeof sale.customer === 'string' && sale.customer.trim()
-        ? sale.customer.trim()
+        ? sale.customer.trim().toLocaleUpperCase('es')
         : typeof existingCustomer?.name === 'string' ? existingCustomer.name : ''
       const customerPhone = typeof sale.customerPhone === 'string' && sale.customerPhone.trim()
         ? sale.customerPhone.trim()

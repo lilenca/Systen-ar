@@ -4,9 +4,11 @@ import { filterContracts, summarizeContracts } from './contractInsights.js'
 import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleDescription, paymentMethods, type SaleProduct } from './sales.js'
 import { formatGuaraniDifference, parseAmount, roundAmount } from './money.js'
 import loginBackground from './assets/login-background.jpg'
+import contractLetterhead from './assets/membrete-contrato.png'
+import PdfPages from './PdfPages'
 import './App.css'
 
-const garmentColors = ['Negro', 'Beige', 'Azul', 'Celeste']
+const garmentColors = ['Negro', 'Beige', 'Azul', 'Celeste', 'Gris', 'Marrón']
 const CONTRACT_PREFIX = '001'
 
 const isoToDisplayDate = (iso: string) => {
@@ -168,6 +170,9 @@ function App() {
   const [login, setLogin] = useState({ email: '', password: '' })
   const [loginError, setLoginError] = useState('')
   const [saveError, setSaveError] = useState('')
+  const [pdfError, setPdfError] = useState('')
+  const [businessDataStatus, setBusinessDataStatus] = useState<'loading' | 'ready' | 'error'>(firebaseEnabled ? 'loading' : 'ready')
+  const [businessDataError, setBusinessDataError] = useState('')
   const [cashError, setCashError] = useState('')
   const [withdrawalError, setWithdrawalError] = useState('')
   const [isSavingSale, setIsSavingSale] = useState(false)
@@ -187,7 +192,7 @@ function App() {
   const [isSavingCashWithdrawal, setIsSavingCashWithdrawal] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null)
-  const pdfFrameRef = useRef<HTMLIFrameElement>(null)
+  const [pdfPagesReady, setPdfPagesReady] = useState(false)
   const [newArticle, setNewArticle] = useState('')
   const [printedContractNumber, setPrintedContractNumber] = useState<number | null>(null)
   const [view, setViewState] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'sales' | 'clients'>('home')
@@ -219,6 +224,18 @@ function App() {
   const [saleForm, setSaleForm] = useState<SaleForm>(saleDefaultForm)
   const [saleCart, setSaleCart] = useState<SaleLineItem[]>([])
   const saleCartTotal = saleCart.reduce((total, item) => total + item.quantity * item.unitPrice, 0)
+
+  useEffect(() => {
+    const preventNumberWheelChange = (event: WheelEvent) => {
+      const target = event.target
+      if (target instanceof HTMLInputElement && target.type === 'number' && target === document.activeElement) {
+        event.preventDefault()
+      }
+    }
+
+    document.addEventListener('wheel', preventNumberWheelChange, { passive: false })
+    return () => document.removeEventListener('wheel', preventNumberWheelChange)
+  }, [])
 
   useEffect(() => {
     const interval = window.setInterval(() => setCashDateKey(getLocalDateKey()), 60_000)
@@ -257,6 +274,7 @@ function App() {
   useEffect(() => {
     if (!isAuthenticated || !firebaseEnabled) return
     let cancelled = false
+    setBusinessDataStatus('loading')
     void loadBusinessData(products, sales, contracts).then((data) => {
       if (cancelled) return
       setSales(data.sales as Sale[])
@@ -265,8 +283,17 @@ function App() {
       localStorage.setItem('sastreria-sales', JSON.stringify(data.sales))
       localStorage.setItem('sastreria-contracts', JSON.stringify(data.contracts))
       localStorage.setItem('sastreria-clientes', JSON.stringify(data.clients))
+      const nextNumber = Math.max(data.nextContractNumber, Number(localStorage.getItem('sastreria-next-contract-number')) || 1)
+      setContractNumber(nextNumber)
+      setActiveContractNumber(nextNumber)
+      localStorage.setItem('sastreria-next-contract-number', String(nextNumber))
+      setBusinessDataError('')
+      setBusinessDataStatus('ready')
     }).catch((error) => {
-      if (!cancelled) setCashError(error instanceof Error ? error.message : 'No se pudieron cargar los datos de Firebase.')
+      if (!cancelled) {
+        setBusinessDataStatus('error')
+        setBusinessDataError(error instanceof Error ? error.message : 'No se pudieron cargar los datos de Firebase.')
+      }
     })
     return () => { cancelled = true }
   }, [isAuthenticated])
@@ -304,7 +331,7 @@ function App() {
 
   const normalizedClientSearch = clientSearchTerm.trim().toLocaleLowerCase('es')
   const filteredClients = useMemo(() => registeredClients.filter((client) => `${client.name} ${client.document} ${client.phone || ''} ${client.address || ''}`.toLocaleLowerCase('es').includes(normalizedClientSearch)), [registeredClients, normalizedClientSearch])
-  const cashReconciliation = useMemo(() => buildCashReconciliation(sales, contracts, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber), [sales, contracts, cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber])
+  const cashReconciliation = useMemo(() => buildCashReconciliation(sales, contracts, dailyCashSession?.dateKey || cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber), [sales, contracts, cashDateKey, dailyCashSession?.dateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber])
   const cashWithdrawals = dailyCashSession?.withdrawals || []
   const totalCashWithdrawals = useMemo(() => cashWithdrawals.reduce((total, withdrawal) => total + Number(withdrawal.amount || 0), 0), [cashWithdrawals])
   const cashCloseSummary = buildCashCloseSummary(dailyCashSession?.openingBalance || 0, cashReconciliation.totalsByMethod.Efectivo, parseAmount(closingCashInput), totalCashWithdrawals)
@@ -361,10 +388,11 @@ function App() {
         return
       }
 
-      autoFilledClient.current = { document, tenant: client.name, address: client.address, phone: client.phone }
+      const name = client.name.toLocaleUpperCase('es')
+      autoFilledClient.current = { document, tenant: name, address: client.address, phone: client.phone }
       setForm((current) => request !== clientLookupSequence.current ? current : ({
         ...current,
-        tenant: current.tenant === currentValues.tenant ? client.name : current.tenant,
+        tenant: current.tenant === currentValues.tenant ? name : current.tenant,
         address: current.address === currentValues.address ? client.address : current.address,
         phone: current.phone === currentValues.phone ? client.phone : current.phone,
       }))
@@ -383,7 +411,7 @@ function App() {
         setSaleClientLookupStatus('not-found')
         return
       }
-      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name, customerPhone: client.phone || '', customerAddress: client.address || '' } : current)
+      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name.toLocaleUpperCase('es'), customerPhone: client.phone || '', customerAddress: client.address || '' } : current)
       setSaleClientLookupStatus('found')
       return
     }
@@ -396,7 +424,7 @@ function App() {
         setSaleClientLookupStatus('not-found')
         return
       }
-      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name, customerPhone: client.phone, customerAddress: client.address } : current)
+      setSaleForm((current) => current.customerDocument.trim() === document ? { ...current, customer: client.name.toLocaleUpperCase('es'), customerPhone: client.phone, customerAddress: client.address } : current)
       setSaleClientLookupStatus('found')
     } catch {
       if (request === saleClientLookupSequence.current) setSaleClientLookupStatus('error')
@@ -481,7 +509,7 @@ function App() {
       pdf.setFont('helvetica', 'normal')
       pdf.setTextColor(222, 210, 193)
       pdf.setFontSize(8)
-      pdf.text(`CAJA N° ${session.sessionNumber} · ${continued ? 'CONTINUACIÓN' : 'CIERRE DIARIO'}`, left + 36, 31)
+      pdf.text(`CAJA N° ${session.sessionNumber} · ${continued ? 'CONTINUACIÓN' : 'CIERRE'}`, left + 36, 31)
       pdf.setTextColor(...gold)
       pdf.setFont('helvetica', 'bold')
       pdf.setFontSize(9)
@@ -514,7 +542,7 @@ function App() {
 
     const summaryCards = [
       ['FONDO INICIAL', guarani(session.openingBalance)],
-      ['INGRESOS DEL DÍA', guarani(cashReconciliation.totalAmount)],
+      ['INGRESOS DE CAJA', guarani(cashReconciliation.totalAmount)],
       ['RETIROS DE CAJA', guarani(session.totalCashWithdrawals ?? (session.withdrawals || []).reduce((total, withdrawal) => total + Number(withdrawal.amount || 0), 0))],
       ['EFECTIVO ESPERADO', guarani(session.expectedCash || 0)],
       ['EFECTIVO CONTADO', guarani(session.countedCash || 0)],
@@ -731,15 +759,23 @@ function App() {
     update('articlePrices', { ...(form.articlePrices || {}), [article]: '' })
     setNewArticle('')
   }
-  const startNew = () => { clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); navigateTo('form') }
+  const startNew = () => { if (businessDataStatus !== 'ready') return; clientLookupSequence.current += 1; autoFilledClient.current = null; setClientLookupStatus('idle'); setForm(emptyContract); setPrintedContractNumber(null); setActiveContractNumber(contractNumber); setStep(1); navigateTo('form') }
   const saveContract = async (keepReview = false): Promise<Contract | null> => {
     setSaveError('')
+    if (!form.depositValue.trim()) {
+      setSaveError('Ingresa la seña abonada. Si no hubo seña, escribe 0.')
+      return null
+    }
+    if (businessDataStatus !== 'ready') {
+      setSaveError('Espera a que se sincronicen los contratos antes de guardar.')
+      return null
+    }
     if (cashSessionStatus !== 'open') {
-      setSaveError('Abre la caja del día antes de registrar pagos o contratos.')
+      setSaveError('Abre una caja antes de registrar pagos o contratos.')
       return null
     }
     setIsSaving(true)
-    const contract: Contract = { ...form, totalValue: String(totalAmount), contractNumber: activeContractNumber, cashSessionId: dailyCashSession?.id, id: crypto.randomUUID(), createdAt: new Date().toISOString() }
+    const contract: Contract = { ...form, tenant: form.tenant.trim().toLocaleUpperCase('es'), totalValue: String(totalAmount), contractNumber: activeContractNumber, cashSessionId: dailyCashSession?.id, id: crypto.randomUUID(), createdAt: new Date().toISOString() }
     let savedContract = contract
 
     try {
@@ -795,12 +831,17 @@ function App() {
     if (navigationTimer.current) window.clearTimeout(navigationTimer.current)
   }, [])
   const printContract = async () => {
-    if ('id' in form && form.id) {
-      window.print()
-      return
+    setPdfError('')
+    try {
+      if ('id' in form && form.id) {
+        await downloadPdf()
+        return
+      }
+      const savedContract = await saveContract(true)
+      if (savedContract) await downloadPdf(savedContract)
+    } catch (error) {
+      setPdfError(error instanceof Error ? error.message : 'No se pudo generar el PDF del contrato.')
     }
-    const savedContract = await saveContract(true)
-    if (savedContract) setTimeout(() => window.print(), 0)
   }
   const deleteContract = (id: string) => {
     const nextContracts = contracts.filter((contract) => contract.id !== id)
@@ -840,7 +881,7 @@ function App() {
     setSaleSuccess('')
     setCashError('')
     if (!dailyCashSession || cashSessionStatus !== 'open') {
-      setCashError('Abre la caja del día antes de registrar ventas.')
+      setCashError('Abre una caja antes de registrar ventas.')
       return
     }
 
@@ -862,7 +903,7 @@ function App() {
       soldAt: new Date().toISOString(),
       cashSessionId: dailyCashSession.id,
       customerDocument: saleForm.customerDocument.trim(),
-      customer: saleForm.customer.trim() || 'Venta directa',
+      customer: saleForm.customer.trim().toLocaleUpperCase('es') || 'VENTA DIRECTA',
       customerPhone: saleForm.customerPhone.trim(),
       customerAddress: saleForm.customerAddress.trim(),
       paymentMethod: saleForm.paymentMethod,
@@ -891,19 +932,34 @@ function App() {
     }
   }
   const downloadSavedPdf = async () => {
-    if ('id' in form && form.id) {
-      await downloadPdf()
-      return
+    setPdfError('')
+    try {
+      if ('id' in form && form.id) {
+        await downloadPdf()
+        return
+      }
+      const savedContract = await saveContract(true)
+      if (savedContract) await downloadPdf(savedContract)
+    } catch (error) {
+      setPdfError(error instanceof Error ? error.message : 'No se pudo generar el PDF del contrato.')
     }
-    const savedContract = await saveContract(true)
-    if (savedContract) await downloadPdf(savedContract)
   }
   const finishContract = async () => {
+    setPdfError('')
     const savedContract = await saveContract()
-    if (savedContract) await downloadPdf(savedContract)
+    if (savedContract) {
+      try {
+        await downloadPdf(savedContract)
+      } catch (error) {
+        setPdfError(error instanceof Error ? `El contrato se guardó, pero no se pudo generar el PDF: ${error.message}` : 'El contrato se guardó, pero no se pudo generar el PDF.')
+      }
+    }
   }
   const downloadPdf = async (savedContract?: Contract) => {
     const { jsPDF } = await import('jspdf')
+    const response = await fetch(contractLetterhead)
+    if (!response.ok) throw new Error('No se pudo cargar el membrete del contrato.')
+    const letterhead = new Uint8Array(await response.arrayBuffer())
     const contractId = savedContract?.contractNumber || reservePrintedNumber()
     const number = formatContractNumber(contractId)
     const pageWidth = 210
@@ -938,16 +994,17 @@ function App() {
     pdf.setTextColor(0, 0, 0)
     pdf.setFont('helvetica', 'bold')
     pdf.setFontSize(13)
-    pdf.text('CONTRATO DE ALQUILER', 105, 12, { align: 'center' })
+    pdf.text('CONTRATO DE ALQUILER', margin, 13)
     pdf.setFont('helvetica', 'bold')
     pdf.setFontSize(8)
-    pdf.text(number, 195, 12, { align: 'right' })
+    pdf.text(number, margin, 21)
+    pdf.addImage(letterhead, 'PNG', pageWidth - margin - 55, 7, 55, 55 * 438 / 657)
     const issuedAt = savedContract?.createdAt || ('createdAt' in form && typeof form.createdAt === 'string' ? form.createdAt : new Date().toISOString())
     pdf.setFont('helvetica', 'normal')
     pdf.setFontSize(6.5)
-    pdf.text(`EMITIDO ${formatDateTime24(issuedAt)}`, margin, 18)
+    pdf.text(`EMITIDO ${formatDateTime24(issuedAt)}`, margin, 27)
 
-    y = 23
+    y = 49
     writeParagraph('El presente contrato de alquiler se efectuará entre la empresa SASTRERIA VLADIMIR ubicada en las calles 14 de mayo el Carlos Antonio López y Balderrama, en la ciudad de Luque y el denominado en adelante EL CLIENTE, que han convenido en celebrar el presente contrato sobre las cláusulas y condiciones siguientes:')
 
     writeClause('PRIMERA:', 'SASTRERIA VLADIMIR hace entrega en este acto a EL CLIENTE de la (las) prenda(s) y/o accesorios, en perfectas condiciones, y este lo recibe conforme, para el uso de la ocasión.')
@@ -991,7 +1048,7 @@ function App() {
 
     pdf.setFontSize(6.8)
     clientFields.forEach(([label, value], index) => {
-      const rowY = y + 6 + index * 7.2
+      const rowY = y + 6 + index * 6.5
       pdf.setFont('helvetica', 'bold')
       pdf.text(label, clientX + 4, rowY)
       pdf.setFont('helvetica', 'normal')
@@ -1045,8 +1102,8 @@ function App() {
     pdf.text(`Domicilio: ${form.address || '________________'}`, 77, y)
     pdf.text(`C.I. N° ${form.document || '________________'}`, 156, y)
 
-    let stubTop = Math.max(y + 7, 262)
-    if (stubTop + 30 > 294) {
+    let stubTop = Math.max(y + 7, 255)
+    if (stubTop + 37 > 294) {
       pdf.addPage()
       stubTop = 14
     }
@@ -1062,7 +1119,8 @@ function App() {
     pdf.setFontSize(9)
     pdf.text('COPIA DEL CLIENTE · SASTRERIA VLADIMIR', margin, stubTop + 6)
     pdf.setFontSize(11)
-    pdf.text(number, pageWidth - margin, stubTop + 6, { align: 'right' })
+    pdf.text(number, 146, stubTop + 6, { align: 'right' })
+    pdf.addImage(letterhead, 'PNG', pageWidth - margin - 49, stubTop + 3, 49, 49 * 438 / 657)
 
     const stubRows: [string, string][] = [
       ['NOMBRE', form.tenant || ''],
@@ -1077,20 +1135,20 @@ function App() {
       pdf.setFont('helvetica', 'bold')
       pdf.text(label, margin, rowY)
       pdf.setFont('helvetica', 'normal')
-      pdf.text(pdf.splitTextToSize(value || '__________', 90)[0], margin + 24, rowY)
+      pdf.text(pdf.splitTextToSize(value || '__________', 60)[0], margin + 24, rowY)
     })
 
     const stubAmounts: [string, string][] = [['TOTAL', guarani(totalAmount)], ['SEÑA', guarani(señaAmount)], ['SALDO', guarani(balanceAmount)]]
     stubAmounts.forEach(([label, value], index) => {
       const rowY = stubTop + 12 + index * 4.6
       pdf.setFont('helvetica', 'bold')
-      pdf.text(label, 140, rowY)
+      pdf.text(label, 100, rowY)
       pdf.setFont('helvetica', 'normal')
-      pdf.text(value, pageWidth - margin, rowY, { align: 'right' })
+      pdf.text(value, 146, rowY, { align: 'right' })
     })
     pdf.setFont('helvetica', 'italic')
     pdf.setFontSize(6.2)
-    pdf.text('Presente esta copia al devolver las prendas.', pageWidth - margin, stubTop + 29, { align: 'right' })
+    pdf.text('Presente esta copia al devolver las prendas.', 146, stubTop + 34, { align: 'right' })
 
     return pdf
     }
@@ -1099,6 +1157,7 @@ function App() {
     for (let scale = 0.96; finalPdf.getNumberOfPages() > 1 && scale >= 0.7; scale -= 0.04) finalPdf = buildPdf(scale)
 
     const filename = `contrato-${String(contractId).padStart(7, '0')}.pdf`
+    setPdfPagesReady(false)
     setPdfPreview((current) => {
       if (current) URL.revokeObjectURL(current.url)
       return { url: URL.createObjectURL(finalPdf.output('blob')), filename }
@@ -1109,8 +1168,7 @@ function App() {
     return null
   })
   const printPdfPreview = () => {
-    const frame = pdfFrameRef.current?.contentWindow
-    if (frame) { frame.focus(); frame.print() }
+    if (pdfPagesReady) window.print()
   }
 
   const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
@@ -1154,7 +1212,7 @@ function App() {
   const handleSaveClient = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!editingClient) return
-    const name = editingClient.name.trim()
+    const name = editingClient.name.trim().toLocaleUpperCase('es')
     const document = editingClient.document.trim()
     const originalDocument = editingClient.originalDocument
     if (!name || !document) {
@@ -1222,10 +1280,13 @@ function App() {
     <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></header>
     <main className={isPageLoading ? 'page-shell is-loading' : 'page-shell'}>
       {isPageLoading && <div className="page-loader" role="status" aria-live="polite" aria-busy="true" aria-label="Cargando"><span className="page-loader-spinner" aria-hidden="true" /></div>}
+      {businessDataStatus === 'loading' && <p role="status">Sincronizando contratos y datos con Firebase...</p>}
+      {businessDataStatus === 'error' && <p className="login-error" role="alert">No se pudieron sincronizar los contratos: {businessDataError}. Revisa la conexión y vuelve a cargar la página.</p>}
+      {pdfError && <p className="login-error" role="alert">{pdfError}</p>}
       {view === 'home' && <>
         <section className="home-toolbar" aria-label="Acciones rápidas">
           <div className="home-toolbar-actions">
-            <button className="primary-button" onClick={startNew}>＋ Nuevo contrato</button>
+            <button className="primary-button" disabled={businessDataStatus !== 'ready'} onClick={startNew}>＋ Nuevo contrato</button>
             <button className="secondary-button" onClick={() => navigateTo('sales')}>＋ Nueva venta</button>
           </div>
           <div className="home-cash-stack">
@@ -1251,7 +1312,7 @@ function App() {
             {clientLookupStatus === 'not-found' && <small role="status">No se encontró un cliente con ese CI.</small>}
             {clientLookupStatus === 'error' && <small role="alert">No se pudo consultar el cliente. Verifica la conexión y los permisos de Firebase.</small>}
           </label>
-          <label>Nombre completo<input required value={form.tenant} onChange={(event) => update('tenant', event.target.value)} placeholder="Ej. Juan Pérez" /></label>
+          <label>Nombre completo<input required value={form.tenant} onChange={(event) => update('tenant', event.target.value.toLocaleUpperCase('es'))} placeholder="Ej. JUAN PÉREZ" /></label>
           <label>Número de teléfono<input required type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={form.phone} onChange={(event) => update('phone', formatParaguayPhone(event.target.value))} placeholder="+595 981234567" /></label>
           <label>Dirección de residencia<input required value={form.address} onChange={(event) => update('address', event.target.value)} placeholder="Calle, número, ciudad" /></label>
           <label>Inicio del contrato<DateInput value={form.startDate} onChange={(iso) => update('startDate', iso)} /></label>
@@ -1261,7 +1322,7 @@ function App() {
           <fieldset className="article-picker wide"><legend>Selecciona los artículos a alquilar</legend><div className="article-grid">{catalog.map((article) => <label className="article-option" key={article}><input type="checkbox" checked={form.articles.includes(article)} onChange={() => toggleArticle(article)} /><span>{article}</span></label>)}{form.articles.filter((article) => !catalog.includes(article)).map((article) => <label className="article-option" key={article}><input type="checkbox" checked onChange={() => toggleArticle(article)} /><span>{article}</span></label>)}</div><div className="custom-article"><input value={newArticle} onChange={(e) => setNewArticle(e.target.value)} placeholder="Otro artículo" /><button type="button" className="secondary-button" onClick={addArticle}>Agregar artículo</button></div></fieldset>
           <div className="wide price-list"><b>Precio de cada artículo (GS.)</b>{form.articles.map((article) => <label key={article}>{article}<input type="number" min="0" value={form.articlePrices?.[article] || ''} onChange={(e) => update('articlePrices', { ...(form.articlePrices || {}), [article]: e.target.value })} placeholder="Ej. 150000" /></label>)}<strong>TOTAL: {guarani(totalAmount)}</strong></div>
           <div className="wide cash-card"><h3>Pago de la seña</h3><label>Forma de pago<select value={form.depositPaymentMethod || 'Efectivo'} onChange={(event) => update('depositPaymentMethod', event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label><small>La seña se registra junto al contrato y su número en el arqueo diario.</small></div>
-          <label>Seña abonada<input type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Saldo pendiente: {guarani(balanceAmount)}</small></label>
+          <label>Seña abonada<input required type="number" min="0" max={totalAmount} value={form.depositValue} onChange={(e) => update('depositValue', e.target.value)} placeholder="Ej. 50000" /><small>Obligatorio; escribe 0 si no hubo seña. Saldo pendiente: {guarani(balanceAmount)}</small></label>
           <label>Color<select required value={form.color} onChange={(e) => update('color', e.target.value)}><option value="">Selecciona un color</option>{[...garmentColors, ...(form.color && !garmentColors.includes(form.color) ? [form.color] : [])].map((color) => <option key={color} value={color}>{color}</option>)}</select></label>
           <label>Talla<select required value={form.size} onChange={(e) => update('size', e.target.value)}><option value="">Selecciona un talle</option>{garmentSizes.map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
           <label>Valor total del alquiler<input required type="number" min="0" value={totalAmount || ''} readOnly /></label>
@@ -1277,7 +1338,7 @@ function App() {
         {cashSessionStatus === 'closed' ? <div className="cash-card full-width"><h3>Caja cerrada</h3><p>Abre una caja antes de registrar ventas.</p><button className="primary-button" onClick={() => { setOpeningBalanceInput(''); setCashSessionStatus('missing') }}>Abrir caja para vender <span>↗</span></button></div> : <div className="cash-grid sales-only">
           <form className="cash-card" onSubmit={(event) => void handleSaleSubmit(event)} onChange={() => setSaleSuccess('')}>
             <label>CI del comprador<input required value={saleForm.customerDocument} onChange={(event) => { saleClientLookupSequence.current += 1; setSaleClientLookupStatus('idle'); setSaleForm({ ...saleForm, customerDocument: event.target.value, customer: '', customerPhone: '', customerAddress: '' }) }} onBlur={() => void lookupSaleClient()} placeholder="Ingrese CI" autoComplete="off" />{saleClientLookupStatus === 'loading' && <small role="status">Buscando en Firebase...</small>}{saleClientLookupStatus === 'found' && <small role="status">Cliente encontrado en Firebase.</small>}{saleClientLookupStatus === 'not-found' && <small role="status">Cliente nuevo; quedará registrado al guardar la venta.</small>}{saleClientLookupStatus === 'error' && <small role="alert">No se pudo consultar Firebase. Verifica la conexión.</small>}</label>
-            <label>Nombre del comprador<input required value={saleForm.customer} onChange={(event) => setSaleForm({ ...saleForm, customer: event.target.value })} placeholder="Nombre y apellido" />{saleClientLookupStatus === 'not-found' && <small>Se guardará en el directorio junto con la venta.</small>}</label>
+            <label>Nombre del comprador<input required value={saleForm.customer} onChange={(event) => setSaleForm({ ...saleForm, customer: event.target.value.toLocaleUpperCase('es') })} placeholder="Nombre y apellido" />{saleClientLookupStatus === 'not-found' && <small>Se guardará en el directorio junto con la venta.</small>}</label>
             {saleClientLookupStatus === 'not-found' && <>
               <label>Teléfono del comprador (opcional)<input type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={saleForm.customerPhone} onChange={(event) => setSaleForm({ ...saleForm, customerPhone: formatParaguayPhone(event.target.value) })} placeholder="+595 981234567" /></label>
               <label>Dirección del comprador (opcional)<input value={saleForm.customerAddress} onChange={(event) => setSaleForm({ ...saleForm, customerAddress: event.target.value })} placeholder="Dirección" /></label>
@@ -1307,19 +1368,19 @@ function App() {
         {cashSessionStatus === 'closed' ? <div className="cash-card full-width"><h3>Caja N° {dailyCashSession?.sessionNumber} cerrada · {formatTime24(dailyCashSession?.closedAt)}</h3><p>El historial de ventas y movimientos de esta caja quedó archivado en el PDF. Los contratos de alquileres se conservan en su historial.</p><button className="primary-button" onClick={() => { setOpeningBalanceInput(''); setCashSessionStatus('missing') }}>Abrir otra caja hoy <span>↗</span></button></div> : <>
           <div className="stats-grid cash-stats"><div className="stat-card"><span>Fondo inicial</span><strong>{guarani(dailyCashSession?.openingBalance || 0)}</strong></div><div className="stat-card"><span>Total ingresado</span><strong>{guarani(cashReconciliation.totalAmount)}</strong></div><div className="stat-card"><span>Retiros</span><strong>{guarani(totalCashWithdrawals)}</strong></div><div className="stat-card"><span>Efectivo esperado</span><strong>{guarani(expectedCash)}</strong></div></div>
           <div className="cash-card full-width">
-            <h3>Arqueo del día</h3>
+            <h3>Movimientos de caja</h3>
             <div className="payment-totals">{paymentMethods.map((method) => <div className="payment-total" key={method}><span>{method}</span><strong>{guarani(cashReconciliation.totalsByMethod[method])}</strong></div>)}<div className="payment-total payment-grand-total"><span>Total ingresado</span><strong>{guarani(cashReconciliation.totalAmount)}</strong></div></div>
-            {cashReconciliation.entries.length === 0 ? <p className="cash-empty">Aún no hay cobros registrados hoy.</p> : <div className="sales-list">{cashReconciliation.entries.map((entry) => <div className="sale-row reconciliation-row" key={entry.id}><span><strong>{entry.customer}</strong><small>CI {entry.customerDocument || 'N/D'} · {entry.reference} · {entry.concept}</small></span><span>{entry.paymentMethod}</span><strong>{guarani(entry.amount)}</strong><small>{formatTime24(entry.paidAt)}</small></div>)}</div>}
+            {cashReconciliation.entries.length === 0 ? <p className="cash-empty">Aún no hay cobros registrados en esta caja.</p> : <div className="sales-list">{cashReconciliation.entries.map((entry) => <div className="sale-row reconciliation-row" key={entry.id}><span><strong>{entry.customer}</strong><small>CI {entry.customerDocument || 'N/D'} · {entry.reference} · {entry.concept}</small></span><span>{entry.paymentMethod}</span><strong>{guarani(entry.amount)}</strong><small>{formatTime24(entry.paidAt)}</small></div>)}</div>}
           </div>
           <div className="cash-card full-width"><div className="withdrawal-list-heading"><h3>Retiros de caja</h3><strong>{guarani(totalCashWithdrawals)}</strong></div>{cashWithdrawals.length === 0 ? <p className="cash-empty">Aún no hay retiros registrados en esta caja.</p> : <div className="sales-list">{cashWithdrawals.map((withdrawal) => <div className="sale-row withdrawal-row" key={withdrawal.id}><span><strong>{withdrawal.reason}</strong><small>Retiro justificado · {formatDateTime24(withdrawal.withdrawnAt)}</small></span><span>Gasto</span><strong>-{guarani(withdrawal.amount)}</strong></div>)}</div>}</div>
         </>}
       </section>}
 
       {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{formatContractNumber(contract.contractNumber || index + 1)}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
-      {pdfPreview && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-label="Vista previa del contrato"><section className="pdf-preview-modal"><div className="pdf-preview-bar"><strong>Vista previa del contrato · A4</strong><div className="pdf-preview-actions"><button type="button" className="primary-button" onClick={printPdfPreview}>Imprimir A4</button><a className="secondary-button" href={pdfPreview.url} download={pdfPreview.filename}>Descargar PDF</a><button type="button" className="secondary-button" onClick={closePdfPreview}>Cerrar ×</button></div></div><iframe ref={pdfFrameRef} className="pdf-preview-frame" src={pdfPreview.url} title="Vista previa del contrato" /></section></div>}
+      {pdfPreview && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-label="Vista previa del contrato"><section className="pdf-preview-modal"><div className="pdf-preview-bar"><strong>Vista previa del contrato · A4</strong><div className="pdf-preview-actions"><button type="button" className="primary-button" onClick={printPdfPreview} disabled={!pdfPagesReady}>Imprimir A4</button><a className="secondary-button" href={pdfPreview.url} download={pdfPreview.filename}>Descargar PDF</a><a className="secondary-button" href={pdfPreview.url} target="_blank" rel="noopener noreferrer">Abrir PDF</a><button type="button" className="secondary-button" onClick={closePdfPreview}>Cerrar ×</button></div></div><PdfPages key={pdfPreview.url} url={pdfPreview.url} onReady={setPdfPagesReady} /></section></div>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
-        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja del día en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja del {dateLabel}. Las ventas y los cobros de alquiler quedarán juntos en esta caja.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
+        {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja abierta en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja. La caja permanecerá abierta aunque cambie el día y solo se cerrará cuando la cierres manualmente.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}
       </section></div>}
       {isClosingCashDialogOpen && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="close-cash-title">
         <p className="eyebrow">CIERRE DE CAJA / {dateLabel.toUpperCase()}</p><h2 id="close-cash-title">Cuenta el efectivo</h2>
@@ -1336,7 +1397,7 @@ function App() {
           <div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setIsCashWithdrawalDialogOpen(false)} disabled={isSavingCashWithdrawal}>Cancelar</button><button type="submit" className="save-button" disabled={isSavingCashWithdrawal}>{isSavingCashWithdrawal ? 'Registrando...' : 'Registrar retiro'}</button></div>
         </form>
       </section></div>}
-      {view === 'clients' && <section className="workspace clients-workspace"><div className="workspace-heading"><div><p className="eyebrow">DIRECTORIO / {registeredClients.length} CLIENTES</p><h2>Clientes registrados</h2></div></div><div className="history-toolbar"><input className="search-input" value={clientSearchTerm} onChange={(event) => setClientSearchTerm(event.target.value)} placeholder="Buscar por nombre, CI, teléfono o dirección" /><span className="history-summary">{filteredClients.length} resultados</span></div>{filteredClients.length === 0 ? <div className="empty-state compact-empty"><span>⌕</span><h3>{registeredClients.length === 0 ? 'Aún no hay clientes registrados' : 'No hay coincidencias'}</h3><p>{registeredClients.length === 0 ? 'Los clientes aparecerán aquí al guardar contratos o ventas con CI.' : 'Prueba otro nombre o número de documento.'}</p></div> : <div className="client-list">{filteredClients.map((client) => <article className="client-row" key={client.document}><span className="client-monogram">{client.name.charAt(0).toUpperCase()}</span><span className="client-primary"><strong>{client.name} <button type="button" className="client-edit-button" onClick={() => { setClientEditError(''); setEditingClient({ originalDocument: client.document, document: client.document, name: client.name, phone: client.phone || '', address: client.address || '' }) }}>Editar ✎</button></strong><small>CI {client.document}</small></span><span className="client-detail">{client.phone || 'Teléfono no registrado'}</span><span className="client-detail">{client.address || 'Dirección no registrada'}</span><span className="client-updated">{client.updatedAt ? `ACTUALIZADO ${formatDateTime24(client.updatedAt)}` : 'REGISTRADO'}</span></article>)}</div>}{editingClient && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-client-title"><div className="cash-modal"><h2 id="edit-client-title">Editar cliente</h2><form onSubmit={(event) => void handleSaveClient(event)}><label>CI<input autoFocus required inputMode="numeric" value={editingClient.document} onChange={(event) => setEditingClient({ ...editingClient, document: event.target.value })} /></label><label>Nombre completo<input required value={editingClient.name} onChange={(event) => setEditingClient({ ...editingClient, name: event.target.value })} /></label><label>Número de teléfono<input type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={editingClient.phone} onChange={(event) => setEditingClient({ ...editingClient, phone: formatParaguayPhone(event.target.value) })} placeholder="+595 981234567" /></label><label>Dirección<input value={editingClient.address} onChange={(event) => setEditingClient({ ...editingClient, address: event.target.value })} /></label>{clientEditError && <p className="login-error" role="alert">{clientEditError}</p>}<div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setEditingClient(null)}>Cancelar</button><button type="submit" className="primary-button" disabled={isSavingClient}>{isSavingClient ? 'Guardando...' : 'Guardar cambios'}</button></div></form></div></div>}</section>}
+      {view === 'clients' && <section className="workspace clients-workspace"><div className="workspace-heading"><div><p className="eyebrow">DIRECTORIO / {registeredClients.length} CLIENTES</p><h2>Clientes registrados</h2></div></div><div className="history-toolbar"><input className="search-input" value={clientSearchTerm} onChange={(event) => setClientSearchTerm(event.target.value)} placeholder="Buscar por nombre, CI, teléfono o dirección" /><span className="history-summary">{filteredClients.length} resultados</span></div>{filteredClients.length === 0 ? <div className="empty-state compact-empty"><span>⌕</span><h3>{registeredClients.length === 0 ? 'Aún no hay clientes registrados' : 'No hay coincidencias'}</h3><p>{registeredClients.length === 0 ? 'Los clientes aparecerán aquí al guardar contratos o ventas con CI.' : 'Prueba otro nombre o número de documento.'}</p></div> : <div className="client-list">{filteredClients.map((client) => <article className="client-row" key={client.document}><span className="client-monogram">{client.name.charAt(0).toUpperCase()}</span><span className="client-primary"><strong>{client.name} <button type="button" className="client-edit-button" onClick={() => { setClientEditError(''); setEditingClient({ originalDocument: client.document, document: client.document, name: client.name.toLocaleUpperCase('es'), phone: client.phone || '', address: client.address || '' }) }}>Editar ✎</button></strong><small>CI {client.document}</small></span><span className="client-detail">{client.phone || 'Teléfono no registrado'}</span><span className="client-detail">{client.address || 'Dirección no registrada'}</span><span className="client-updated">{client.updatedAt ? `ACTUALIZADO ${formatDateTime24(client.updatedAt)}` : 'REGISTRADO'}</span></article>)}</div>}{editingClient && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="edit-client-title"><div className="cash-modal"><h2 id="edit-client-title">Editar cliente</h2><form onSubmit={(event) => void handleSaveClient(event)}><label>CI<input autoFocus required inputMode="numeric" value={editingClient.document} onChange={(event) => setEditingClient({ ...editingClient, document: event.target.value })} /></label><label>Nombre completo<input required value={editingClient.name} onChange={(event) => setEditingClient({ ...editingClient, name: event.target.value.toLocaleUpperCase('es') })} /></label><label>Número de teléfono<input type="tel" inputMode="tel" pattern="\+595 9\d{8}" title="Formato: +595 9XXXXXXXX" value={editingClient.phone} onChange={(event) => setEditingClient({ ...editingClient, phone: formatParaguayPhone(event.target.value) })} placeholder="+595 981234567" /></label><label>Dirección<input value={editingClient.address} onChange={(event) => setEditingClient({ ...editingClient, address: event.target.value })} /></label>{clientEditError && <p className="login-error" role="alert">{clientEditError}</p>}<div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setEditingClient(null)}>Cancelar</button><button type="submit" className="primary-button" disabled={isSavingClient}>{isSavingClient ? 'Guardando...' : 'Guardar cambios'}</button></div></form></div></div>}</section>}
     </main><footer><div className="footer-brand"><strong>SASTRERÍA VLADIMIR</strong><span>DESDE 2012 <i>·</i> ELEGANCIA QUE DEJA HUELLA</span></div></footer>
   </div>
 }

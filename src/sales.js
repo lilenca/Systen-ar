@@ -78,9 +78,14 @@ export function buildSalesSummary(sales = [], dateKey = getLocalDateKey(), cashS
 }
 
 export function buildCashReconciliation(sales = [], contracts = [], dateKey = getLocalDateKey(), cashSessionId, sessionNumber = 1) {
+  const belongsToCurrentCash = (item) => {
+    if (!cashSessionId) return getLocalDateKey(item.soldAt || item.createdAt) === dateKey;
+    if (item.cashSessionId) return item.cashSessionId === cashSessionId;
+    return getLocalDateKey(item.soldAt || item.createdAt) === dateKey && belongsToCashSession(item, cashSessionId, sessionNumber);
+  };
   const entries = [
     ...sales
-      .filter((sale) => sale.soldAt && getLocalDateKey(sale.soldAt) === dateKey && belongsToCashSession(sale, cashSessionId, sessionNumber))
+      .filter((sale) => sale.soldAt && belongsToCurrentCash(sale))
       .map((sale) => ({
         id: sale.id,
         movementType: 'VENTA',
@@ -93,7 +98,7 @@ export function buildCashReconciliation(sales = [], contracts = [], dateKey = ge
         paidAt: sale.soldAt,
       })),
     ...contracts
-      .filter((contract) => contract.createdAt && getLocalDateKey(contract.createdAt) === dateKey && belongsToCashSession(contract, cashSessionId, sessionNumber) && parseAmount(contract.depositValue) > 0)
+      .filter((contract) => contract.createdAt && belongsToCurrentCash(contract) && parseAmount(contract.depositValue) > 0)
       .map((contract) => ({
         id: `contract-${contract.id}`,
         movementType: 'ALQUILER',

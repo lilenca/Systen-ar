@@ -489,4 +489,23 @@ textarea { min-height: 110px; resize: vertical; }
 .pdf-preview-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 18px; border-bottom: 1px solid rgba(220, 190, 145, .3); }
 .pdf-preview-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .pdf-preview-actions a { display: inline-flex; align-items: center; text-decoration: none; }
-.pdf-preview-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+.pdf-preview-content { min-height: 0; overflow: auto; padding: 16px; background: #666; }
+.pdf-preview-content p { color: #fff; }
+.pdf-preview-pages { display: grid; justify-items: center; gap: 16px; }
+.pdf-preview-pages canvas { display: block; width: min(100%, 794px); height: auto; background: #fff; box-shadow: 0 2px 8px #0006; }
+@media print {
+  @page contract-pdf { size: A4 portrait; margin: 0; }
+  body:has(.pdf-preview-modal) { margin: 0; }
+  body:has(.pdf-preview-modal) * { visibility: hidden; }
+  body:has(.pdf-preview-modal) .pdf-preview-modal,
+  body:has(.pdf-preview-modal) .pdf-preview-content,
+  body:has(.pdf-preview-modal) .pdf-preview-pages,
+  body:has(.pdf-preview-modal) .pdf-preview-pages canvas { visibility: visible; }
+  body:has(.pdf-preview-modal) .cash-modal-backdrop { position: absolute; inset: 0; display: block; padding: 0; background: none; }
+  body:has(.pdf-preview-modal) .pdf-preview-modal { position: absolute; inset: 0; width: 100%; height: auto; display: block; border: 0; box-shadow: none; background: white; }
+  body:has(.pdf-preview-modal) .pdf-preview-bar { display: none; }
+  body:has(.pdf-preview-modal) .pdf-preview-content { overflow: visible; padding: 0; background: white; }
+  body:has(.pdf-preview-modal) .pdf-preview-pages { display: block; }
+  body:has(.pdf-preview-modal) .pdf-preview-pages canvas { page: contract-pdf; width: 100%; height: auto; box-shadow: none; break-after: page; }
+  body:has(.pdf-preview-modal) .pdf-preview-pages canvas:last-child { break-after: auto; }
+}

@@ -2,6 +2,14 @@
 
 Aplicación web en React + TypeScript + Vite para gestionar alquileres, contratos y caja.
 
+La caja permanece abierta al cambiar el día; se cierra únicamente cuando se usa la acción manual **Cerrar caja**. Los movimientos posteriores a medianoche siguen asociados a esa misma caja. Las cajas de días anteriores que quedaron abiertas con versiones antiguas no se reactivan automáticamente.
+
+Los nombres de clientes se escriben y se guardan en mayúsculas en contratos, ventas y en el directorio de clientes.
+
+Al registrar un contrato, la seña abonada es obligatoria; si no hubo seña se debe ingresar `0`.
+
+El PDF incluye el membrete sin fondo en la esquina superior derecha del contrato y en la copia del cliente. La vista previa se muestra en la aplicación; desde ella puedes imprimir, abrir o descargar el PDF.
+
 ## Requisitos de despliegue
 
 La app requiere las siguientes variables de entorno en Vercel:
