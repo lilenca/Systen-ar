@@ -142,7 +142,7 @@ type RegisteredClient = {
   manuallyEdited?: boolean
 }
 
-const catalog = ['Traje', 'Camisa', 'Corbata', 'Zapato', 'Cinto']
+const catalog = ['Traje', 'Camisa', 'Camisa blanca', 'Camisa celeste', 'Camisa rosa', 'Pantalón solo', 'Corbata', 'Zapato', 'Cinto', 'Chaleco', 'Tirantes', 'Gemelos', 'Sujeta-corbata']
 const garmentSizes = ['40', '42', '44', '46', '48', '50', '52', '54', '56', '58', '60', '62', 'Talle niño', 'Talle especial']
 const emptyContract: ContractForm = {
   tenant: '', address: '', document: '', phone: '', startDate: '', endDate: '',
