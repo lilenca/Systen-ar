@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, observeAuthentication, openDailyCashSession, recordCashWithdrawal, saveContractToFirestore, saveSaleToFirestore, signIn, signOut, renameClientInFirestore, type CashWithdrawal, type DailyCashSession } from './firebase'
+import { closeDailyCashSession, firebaseEnabled, findClientByDocument, loadBusinessData, loadDailyCashSession, observeAuthentication, openDailyCashSession, recordCashWithdrawal, recordSalePaymentToFirestore, saveContractToFirestore, saveSaleToFirestore, signIn, signOut, renameClientInFirestore, type CashWithdrawal, type DailyCashSession } from './firebase'
 import { filterContracts, summarizeContracts } from './contractInsights.js'
-import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleDescription, paymentMethods, type SaleProduct } from './sales.js'
+import { buildCashCloseSummary, buildCashReconciliation, defaultProducts, getLocalDateKey, getSaleBalance, getSaleDescription, getSalePaidAmount, getSaleTotal, paymentMethods, type SalePayment, type SaleProduct } from './sales.js'
 import { formatGuaraniDifference, parseAmount, roundAmount } from './money.js'
 import loginBackground from './assets/login-background.jpg'
 import contractLetterhead from './assets/membrete-contrato.png'
@@ -121,6 +121,7 @@ type Sale = {
   customerAddress?: string
   paymentMethod: string
   receiptNumber: string
+  payments?: SalePayment[]
 }
 type SaleForm = {
   productId: string
@@ -175,8 +176,17 @@ function App() {
   const [businessDataError, setBusinessDataError] = useState('')
   const [cashError, setCashError] = useState('')
   const [withdrawalError, setWithdrawalError] = useState('')
+  const [receiptError, setReceiptError] = useState('')
   const [isSavingSale, setIsSavingSale] = useState(false)
   const [saleSuccess, setSaleSuccess] = useState('')
+  const [salePaymentAmount, setSalePaymentAmount] = useState('')
+  const [collectionSearchTerm, setCollectionSearchTerm] = useState('')
+  const [collectionSale, setCollectionSale] = useState<Sale | null>(null)
+  const [collectionPaymentAmount, setCollectionPaymentAmount] = useState('')
+  const [collectionPaymentMethod, setCollectionPaymentMethod] = useState('Efectivo')
+  const [collectionError, setCollectionError] = useState('')
+  const [collectionSuccess, setCollectionSuccess] = useState('')
+  const [isSavingCollection, setIsSavingCollection] = useState(false)
   const [saleClientLookupStatus, setSaleClientLookupStatus] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle')
   const [cashDateKey, setCashDateKey] = useState(() => getLocalDateKey())
   const [dailyCashSession, setDailyCashSession] = useState<DailyCashSession | null>(null)
@@ -191,17 +201,18 @@ function App() {
   const [isCashWithdrawalDialogOpen, setIsCashWithdrawalDialogOpen] = useState(false)
   const [isSavingCashWithdrawal, setIsSavingCashWithdrawal] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
-  const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string } | null>(null)
+  const [pdfPreview, setPdfPreview] = useState<{ url: string; filename: string; kind: 'contrato' | 'recibo' } | null>(null)
   const [pdfPagesReady, setPdfPagesReady] = useState(false)
   const [newArticle, setNewArticle] = useState('')
   const [printedContractNumber, setPrintedContractNumber] = useState<number | null>(null)
-  const [view, setViewState] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'sales' | 'clients'>('home')
+  const [view, setViewState] = useState<'home' | 'form' | 'review' | 'history' | 'cash' | 'sales' | 'collections' | 'clients'>('home')
   const [isPageLoading, setIsPageLoading] = useState(false)
   const [step, setStep] = useState(1)
   const [form, setForm] = useState<ContractForm>(emptyContract)
   const clientLookupSequence = useRef(0)
   const saleClientLookupSequence = useRef(0)
   const saleSubmissionLock = useRef(false)
+  const collectionSubmissionLock = useRef(false)
   const autoFilledClient = useRef<{ document: string; tenant: string; address: string; phone: string } | null>(null)
   const [clientLookupStatus, setClientLookupStatus] = useState<'idle' | 'loading' | 'found' | 'not-found' | 'error'>('idle')
   const [activeContractNumber, setActiveContractNumber] = useState(() => Number(localStorage.getItem('sastreria-next-contract-number') || '1'))
@@ -331,6 +342,13 @@ function App() {
 
   const normalizedClientSearch = clientSearchTerm.trim().toLocaleLowerCase('es')
   const filteredClients = useMemo(() => registeredClients.filter((client) => `${client.name} ${client.document} ${client.phone || ''} ${client.address || ''}`.toLocaleLowerCase('es').includes(normalizedClientSearch)), [registeredClients, normalizedClientSearch])
+  const normalizedCollectionSearch = collectionSearchTerm.trim().toLocaleLowerCase('es')
+  const filteredOutstandingSales = useMemo(() => sales.filter((sale) => {
+    if (getSaleBalance(sale) <= 0) return false
+    const paymentReceipts = (sale.payments || []).map((payment) => payment.receiptNumber || '').join(' ')
+    const searchText = `${sale.receiptNumber || ''} ${paymentReceipts} ${sale.id} ${sale.customer} ${sale.customerDocument} ${getSaleDescription(sale)}`.toLocaleLowerCase('es')
+    return searchText.includes(normalizedCollectionSearch)
+  }), [sales, normalizedCollectionSearch])
   const cashReconciliation = useMemo(() => buildCashReconciliation(sales, contracts, dailyCashSession?.dateKey || cashDateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber), [sales, contracts, cashDateKey, dailyCashSession?.dateKey, dailyCashSession?.id, dailyCashSession?.sessionNumber])
   const cashWithdrawals = dailyCashSession?.withdrawals || []
   const totalCashWithdrawals = useMemo(() => cashWithdrawals.reduce((total, withdrawal) => total + Number(withdrawal.amount || 0), 0), [cashWithdrawals])
@@ -870,16 +888,124 @@ function App() {
       quantity,
       unitPrice,
     }])
+    setSalePaymentAmount(String(saleCartTotal + quantity * unitPrice))
     setSaleForm((current) => ({ ...current, quantity: 1 }))
     setCashError('')
     setSaleSuccess('')
   }
-  const removeSaleItem = (id: string) => setSaleCart((current) => current.filter((item) => item.id !== id))
+  const removeSaleItem = (id: string) => {
+    const nextCart = saleCart.filter((item) => item.id !== id)
+    setSaleCart(nextCart)
+    setSalePaymentAmount(nextCart.length ? String(nextCart.reduce((total, item) => total + item.quantity * item.unitPrice, 0)) : '')
+  }
+  const getNextLocalReceiptNumber = () => {
+    const storedNumbers = sales.flatMap((sale) => [
+      sale.receiptNumber,
+      ...(sale.payments || []).map((payment) => payment.receiptNumber),
+    ]).map((receipt) => Number(/^REC-(\d+)$/.exec(receipt || '')?.[1] || 0))
+    return `REC-${String(Math.max(0, ...storedNumbers) + 1).padStart(7, '0')}`
+  }
+  const previewPaymentReceipt = async (sale: Sale, payment: SalePayment) => {
+    const { jsPDF } = await import('jspdf')
+    const pdf = new jsPDF({ orientation: 'landscape', format: [210, 140], unit: 'mm' })
+    const response = await fetch(contractLetterhead)
+    if (!response.ok) throw new Error('No se pudo cargar el membrete del recibo.')
+    const letterhead = new Uint8Array(await response.arrayBuffer())
+    const pageHeight = 140
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const left = 12
+    const right = pageWidth - left
+    const contentWidth = right - left
+    const paidAmount = getSalePaidAmount(sale)
+    const balance = getSaleBalance(sale)
+    const paymentLabel = payment.kind === 'initial' && balance > 0 ? 'SEÑA DE VENTA' : payment.kind === 'collection' ? 'ABONO DE VENTA' : 'PAGO DE VENTA'
+    const details = sale.items?.length
+      ? sale.items.map((item) => `${item.quantity} x ${item.productName}: ${guarani(item.quantity * item.unitPrice)}`).join('  ·  ')
+      : `${sale.productName}: ${guarani(sale.totalAmount || sale.unitPrice)}`
+    const totals = [
+      ['Total de la venta', getSaleTotal(sale)],
+      ['Pagado acumulado', paidAmount],
+      ['Abonado en este recibo', payment.amount],
+      ['Saldo pendiente', balance],
+    ] as const
+
+    pdf.setDrawColor(214, 173, 104)
+    pdf.setLineWidth(0.5)
+    pdf.line(left, 4, right, 4)
+    pdf.addImage(letterhead, 'PNG', left, 7, 62, 62 * 438 / 657)
+    pdf.setTextColor(29, 42, 36)
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(11)
+    pdf.text('RECIBO DE PAGO', right, 17, { align: 'right' })
+    pdf.setTextColor(160, 116, 46)
+    pdf.setFontSize(9)
+    pdf.text(payment.receiptNumber || sale.receiptNumber, right, 24, { align: 'right' })
+    pdf.setTextColor(29, 42, 36)
+    pdf.setFontSize(8)
+    pdf.text(paymentLabel, right, 31, { align: 'right' })
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(8)
+    pdf.text(`Fecha: ${formatDateTime24(payment.paidAt)}`, right, 38, { align: 'right' })
+    pdf.line(left, 49, right, 49)
+
+    pdf.setFont('helvetica', 'bold')
+    pdf.setFontSize(8)
+    const customerLines = pdf.splitTextToSize(`Cliente: ${sale.customer}`, contentWidth)
+    pdf.text(customerLines, left, 57, { lineHeightFactor: 1.1 })
+    const customerLineHeight = 8 * 0.55
+    const customerInfoY = 57 + customerLines.length * customerLineHeight + 3
+    pdf.setFont('helvetica', 'normal')
+    pdf.text(`CI: ${sale.customerDocument || 'N/D'}     Venta: ${sale.receiptNumber || 'N/D'}`, left, customerInfoY, { maxWidth: contentWidth })
+    pdf.setFont('helvetica', 'bold')
+    const detailHeadingY = customerInfoY + 8
+    pdf.text('Detalle', left, detailHeadingY)
+    pdf.setFont('helvetica', 'normal')
+
+    let detailFontSize = 8
+    let detailLines: string[] = []
+    let detailLineHeight = 4
+    let detailStartY = detailHeadingY + 6
+    let detailBottom = 0
+    let totalsStart = 0
+    let footerY = 0
+    for (; detailFontSize >= 5; detailFontSize -= 0.5) {
+      pdf.setFontSize(detailFontSize)
+      detailLines = pdf.splitTextToSize(details, contentWidth)
+      detailLineHeight = detailFontSize * 0.55
+      detailBottom = detailStartY + detailLines.length * detailLineHeight
+      totalsStart = detailBottom + 8
+      footerY = totalsStart + totals.length * 5 + 1
+      if (footerY <= pageHeight - 17) break
+    }
+
+    pdf.setFontSize(detailFontSize)
+    pdf.text(detailLines, left, detailStartY, { lineHeightFactor: 1.1 })
+    pdf.line(left, detailBottom + 2, right, detailBottom + 2)
+
+    let y = totalsStart
+    totals.forEach(([label, amount]) => {
+      pdf.setFont('helvetica', label === 'Saldo pendiente' ? 'bold' : 'normal')
+      pdf.setFontSize(8)
+      pdf.text(label, left, y)
+      pdf.text(guarani(amount), right, y, { align: 'right' })
+      y += 5
+    })
+    pdf.setFont('helvetica', 'normal')
+    pdf.setFontSize(7.5)
+    pdf.text(`Medio de pago: ${payment.paymentMethod || 'Efectivo'}`, left, y + 1)
+    pdf.setTextColor(98, 112, 104)
+    pdf.setFontSize(6.5)
+    pdf.text('Conserve este recibo para consultar el saldo de la venta.', right, pageHeight - 6, { align: 'right' })
+    pdf.setDrawColor(214, 173, 104)
+    pdf.line(left, pageHeight - 4, right, pageHeight - 4)
+    openPdfPreview(pdf.output('blob'), `recibo-${payment.receiptNumber || sale.receiptNumber}.pdf`, 'recibo')
+  }
   const handleSaleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (saleSubmissionLock.current) return
     setSaleSuccess('')
     setCashError('')
+    setReceiptError('')
     if (!dailyCashSession || cashSessionStatus !== 'open') {
       setCashError('Abre una caja antes de registrar ventas.')
       return
@@ -891,6 +1017,12 @@ function App() {
     }
     saleSubmissionLock.current = true
     const totalAmount = saleCartTotal
+    const receivedAmount = parseAmount(salePaymentAmount)
+    if (receivedAmount > totalAmount) {
+      setCashError('El monto recibido no puede superar el total de la venta.')
+      saleSubmissionLock.current = false
+      return
+    }
 
     let sale: Sale = {
       id: crypto.randomUUID(),
@@ -907,28 +1039,116 @@ function App() {
       customerPhone: saleForm.customerPhone.trim(),
       customerAddress: saleForm.customerAddress.trim(),
       paymentMethod: saleForm.paymentMethod,
-      receiptNumber: `REC-${String(sales.length + 1).padStart(7, '0')}`,
+      receiptNumber: '',
+    }
+    let payment: SalePayment = {
+      id: crypto.randomUUID(),
+      amount: receivedAmount,
+      paymentMethod: saleForm.paymentMethod,
+      paidAt: sale.soldAt,
+      cashSessionId: dailyCashSession.id,
+      kind: 'initial',
     }
 
     setIsSavingSale(true)
     try {
       if (firebaseEnabled) {
-        const result = await saveSaleToFirestore(sale)
+        const result = await saveSaleToFirestore(sale, payment)
         sale = result.sale as Sale
+        payment = result.payment
+      } else {
+        payment = { ...payment, receiptNumber: getNextLocalReceiptNumber() }
+        sale = { ...sale, receiptNumber: payment.receiptNumber || '', payments: [payment] }
       }
       const nextSales = [sale, ...sales]
       setSales(nextSales)
       localStorage.setItem('sastreria-sales', JSON.stringify(nextSales))
       setSaleCart([])
       setSaleForm(saleDefaultForm)
+      setSalePaymentAmount('')
       saleClientLookupSequence.current += 1
       setSaleClientLookupStatus('idle')
-      setSaleSuccess('Guardado con éxito')
+      try {
+        await previewPaymentReceipt(sale, payment)
+        setSaleSuccess(`Venta guardada. Recibo ${payment.receiptNumber} listo para imprimir. Saldo pendiente: ${guarani(getSaleBalance(sale))}.`)
+      } catch (error) {
+        setReceiptError(error instanceof Error ? `La venta se guardó, pero no se pudo generar el recibo: ${error.message}` : 'La venta se guardó, pero no se pudo generar el recibo.')
+        setSaleSuccess(`Venta guardada. Saldo pendiente: ${guarani(getSaleBalance(sale))}.`)
+      }
     } catch (error) {
       setCashError(error instanceof Error ? error.message : 'No se pudo guardar la venta.')
     } finally {
       saleSubmissionLock.current = false
       setIsSavingSale(false)
+    }
+  }
+  const openCollectionDialog = (sale: Sale) => {
+    setCollectionSale(sale)
+    setCollectionPaymentAmount(String(getSaleBalance(sale)))
+    setCollectionPaymentMethod('Efectivo')
+    setCollectionError('')
+    setCollectionSuccess('')
+    setReceiptError('')
+  }
+  const handleCollectionSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (collectionSubmissionLock.current || !collectionSale) return
+    setCollectionError('')
+    setCollectionSuccess('')
+    setReceiptError('')
+    if (!dailyCashSession || cashSessionStatus !== 'open') {
+      setCollectionError('Abre una caja antes de registrar un abono.')
+      return
+    }
+
+    const currentSale = sales.find((sale) => sale.id === collectionSale.id)
+    if (!currentSale) {
+      setCollectionError('No se encontró la venta seleccionada. Actualiza la pantalla e inténtalo nuevamente.')
+      return
+    }
+    const amount = parseAmount(collectionPaymentAmount)
+    const remainingBalance = getSaleBalance(currentSale)
+    if (amount <= 0 || amount > remainingBalance) {
+      setCollectionError(`Ingresa un monto mayor que cero y hasta ${guarani(remainingBalance)}.`)
+      return
+    }
+
+    collectionSubmissionLock.current = true
+    setIsSavingCollection(true)
+    let payment: SalePayment = {
+      id: crypto.randomUUID(),
+      amount,
+      paymentMethod: collectionPaymentMethod,
+      paidAt: new Date().toISOString(),
+      cashSessionId: dailyCashSession.id,
+      kind: 'collection',
+    }
+    try {
+      let updatedSale: Sale
+      if (firebaseEnabled) {
+        const result = await recordSalePaymentToFirestore(currentSale.id, payment)
+        updatedSale = result.sale as Sale
+        payment = result.payment
+      } else {
+        payment = { ...payment, receiptNumber: getNextLocalReceiptNumber() }
+        updatedSale = { ...currentSale, payments: [...(currentSale.payments || []), payment] }
+      }
+      const nextSales = sales.map((sale) => sale.id === updatedSale.id ? updatedSale : sale)
+      setSales(nextSales)
+      localStorage.setItem('sastreria-sales', JSON.stringify(nextSales))
+      setCollectionSale(null)
+      try {
+        await previewPaymentReceipt(updatedSale, payment)
+        setCollectionSuccess(`Abono registrado. Recibo ${payment.receiptNumber} listo para imprimir; saldo pendiente: ${guarani(getSaleBalance(updatedSale))}.`)
+      } catch (error) {
+        setCollectionSuccess(`Abono registrado. Saldo pendiente: ${guarani(getSaleBalance(updatedSale))}.`)
+        setReceiptError(error instanceof Error ? `El abono se guardó, pero no se pudo generar el recibo: ${error.message}` : 'El abono se guardó, pero no se pudo generar el recibo.')
+      }
+    } catch (error) {
+      setCollectionError(error instanceof Error ? error.message : 'No se pudo guardar el abono.')
+    } finally {
+      collectionSubmissionLock.current = false
+      setIsSavingCollection(false)
     }
   }
   const downloadSavedPdf = async () => {
@@ -1157,10 +1377,14 @@ function App() {
     for (let scale = 0.96; finalPdf.getNumberOfPages() > 1 && scale >= 0.7; scale -= 0.04) finalPdf = buildPdf(scale)
 
     const filename = `contrato-${String(contractId).padStart(7, '0')}.pdf`
+    openPdfPreview(finalPdf.output('blob'), filename, 'contrato')
+  }
+  const openPdfPreview = (blob: Blob, filename: string, kind: 'contrato' | 'recibo') => {
+    const url = URL.createObjectURL(blob)
     setPdfPagesReady(false)
     setPdfPreview((current) => {
       if (current) URL.revokeObjectURL(current.url)
-      return { url: URL.createObjectURL(finalPdf.output('blob')), filename }
+      return { url, filename, kind }
     })
   }
   const closePdfPreview = () => setPdfPreview((current) => {
@@ -1277,7 +1501,7 @@ function App() {
   if (!isAuthenticated) return <div className="login-screen" onKeyDown={focusNextFieldOnEnter}><div className="login-visual"><img src={loginBackground} alt="Sastrería Vladimir" /><strong>SASTRERÍA<br />VLADIMIR</strong><span>ALQUILERES · CONTRATOS · ESTILO</span></div><div className="login-panel"><div className="login-logo">S</div><p className="eyebrow">SASTRERÍA VLADIMIR / ADMIN</p><h1>Acceso privado.</h1><p className="login-copy">Ingresa con tu cuenta administradora para gestionar contratos y documentos.</p><form onSubmit={(event) => void handleLogin(event)} className="login-form"><label>Correo electrónico<input autoFocus required type="email" autoComplete="username" value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} placeholder="admin@ejemplo.com" /></label><label>Contraseña<input required type="password" autoComplete="current-password" value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} placeholder="••••••••" /></label>{loginError && <p className="login-error" role="alert">{loginError}</p>}<button className="primary-button" type="submit" disabled={isLoggingIn || !firebaseEnabled || readLoginLock() > 0}>{isLoggingIn ? 'Ingresando...' : 'Entrar al sistema'} <span>↗</span></button>{!firebaseEnabled && <p className="login-error" role="alert">Firebase no está configurado. No es posible iniciar sesión.</p>}</form><small className="login-hint">Autenticación segura administrada por Firebase.</small></div></div>
 
   return <div className="app-shell" onKeyDown={focusNextFieldOnEnter}>
-    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button>{view !== 'home' && <button className="header-nav-button" onClick={() => navigateTo('home')}>Inicio</button>}<button className="logout-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></header>
+    <header className="topbar"><button className="brand" aria-label="Volver al inicio" title="Volver al inicio" onClick={() => navigateTo('home')}><span className="brand-mark brand-thimble" aria-hidden="true"><span className="brand-thimble-rim" /></span><span>SASTRERÍA<br /><strong>CONTROL</strong></span></button><div className="topbar-actions"><div className="status"><span className="status-dot" /><strong className="status-mode">{firebaseEnabled ? 'MODO FIREBASE' : 'MODO SIN CONEXIÓN'}</strong><span className="status-separator">·</span><span className="status-detail">{firebaseEnabled ? 'DATOS SINCRONIZADOS CON FIREBASE' : 'DOCUMENTOS LOCALES · PRIVADOS'}</span></div><button className="header-nav-button" onClick={() => navigateTo('clients')}>Clientes</button><button className="header-nav-button" onClick={() => navigateTo('collections')}>Saldos pendientes</button><button className="logout-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></header>
     <main className={isPageLoading ? 'page-shell is-loading' : 'page-shell'}>
       {isPageLoading && <div className="page-loader" role="status" aria-live="polite" aria-busy="true" aria-label="Cargando"><span className="page-loader-spinner" aria-hidden="true" /></div>}
       {businessDataStatus === 'loading' && <p role="status">Sincronizando contratos y datos con Firebase...</p>}
@@ -1288,6 +1512,7 @@ function App() {
           <div className="home-toolbar-actions">
             <button className="primary-button" disabled={businessDataStatus !== 'ready'} onClick={startNew}>＋ Nuevo contrato</button>
             <button className="secondary-button" onClick={() => navigateTo('sales')}>＋ Nueva venta</button>
+            <button className="secondary-button" onClick={() => navigateTo('collections')}>Cobrar saldo</button>
           </div>
           <div className="home-cash-stack">
             <button className="home-cash-link" onClick={() => navigateTo('cash')}>
@@ -1332,8 +1557,9 @@ function App() {
       {view === 'review' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">VISTA PREVIA A4 / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</p><h2>Revisa los datos</h2></div><button className="text-button" onClick={() => setView('form')}>Editar ✎</button></div><article className="contract-preview"><div className="contract-head"><span>SC / CONTRATO {formatContractNumber(form.contractNumber || contractNumber)}</span><b>SASTRERÍA<br />CONTROL</b></div><h3>Contrato de arrendamiento<br />de traje formal</h3><p>Entre Sastrería Control y <strong>{form.tenant || 'el arrendatario'}</strong>, identificado con documento <strong>{form.document || 'pendiente'}</strong>, se acuerda el alquiler de los artículos descritos:</p><div className="preview-data"><div><small>ARTÍCULOS</small><strong>{form.articles.join(' · ') || 'Pendiente'}</strong></div><div><small>TRAJE / TALLA / COLOR</small><strong>{form.suit || 'Pendiente'} / {form.size || '—'} / {form.color || '—'}</strong></div><div><small>VIGENCIA</small><strong>{formatDate(form.startDate)} — {formatDate(form.endDate)}</strong></div><div><small>VALOR TOTAL</small><strong>{money(totalAmount)}</strong></div></div><p>{form.restrictions || 'El arrendatario se compromete a devolver los artículos en las mismas condiciones en que los recibe.'}</p>{form.promissoryNote && <div className="note-box"><b>PAGARÉ AUTOMÁTICO · {money(promissoryValue)}</b><span>Valor correspondiente a cinco veces el costo total del alquiler.</span></div>}<div className="signatures"><span>Firma arrendatario</span><span>Firma responsable</span></div></article>{saveError && <p className="login-error">{saveError}</p>}<div className="form-actions review-actions"><button className="secondary-button" onClick={() => setView('form')}>← Volver a editar</button><button className="primary-button" onClick={() => void printContract()}>Imprimir A4 <span>↗</span></button><button className="secondary-button" onClick={() => void downloadSavedPdf()}>Descargar PDF ↓</button><button className="save-button" disabled={isSaving} onClick={() => void saveContract()}>{isSaving ? 'Guardando...' : 'Guardar contrato'}</button></div></section>}
 
       {view === 'sales' && <section className="workspace">
-        <div className="workspace-heading"><div><p className="eyebrow">VENTAS / {dateLabel.toUpperCase()}</p><h2>Registrar venta</h2></div><button className="text-button" onClick={() => navigateTo('cash')}>Ir a Caja ↗</button></div>
+        <div className="workspace-heading"><div><p className="eyebrow">VENTAS / {dateLabel.toUpperCase()}</p><h2>Registrar venta</h2></div><div className="cash-heading-actions"><button className="secondary-button" onClick={() => navigateTo('collections')}>Cobrar saldo pendiente</button><button className="text-button" onClick={() => navigateTo('cash')}>Ir a Caja ↗</button></div></div>
         {cashError && <p className="login-error" role="alert">{cashError}</p>}
+        {receiptError && <p className="login-error" role="alert">{receiptError}</p>}
         {saleSuccess && <p className="sale-success" role="status">{saleSuccess}</p>}
         {cashSessionStatus === 'closed' ? <div className="cash-card full-width"><h3>Caja cerrada</h3><p>Abre una caja antes de registrar ventas.</p><button className="primary-button" onClick={() => { setOpeningBalanceInput(''); setCashSessionStatus('missing') }}>Abrir caja para vender <span>↗</span></button></div> : <div className="cash-grid sales-only">
           <form className="cash-card" onSubmit={(event) => void handleSaleSubmit(event)} onChange={() => setSaleSuccess('')}>
@@ -1354,12 +1580,37 @@ function App() {
                 <strong>{guarani(item.quantity * item.unitPrice)}</strong>
                 <button type="button" className="sale-cart-remove" aria-label={`Quitar ${item.productName}`} onClick={() => removeSaleItem(item.id)}>Quitar</button>
               </div>)}
-              <div className="sale-cart-total"><span>Total a cobrar</span><strong>{guarani(saleCartTotal)}</strong></div>
+              <div className="sale-cart-total"><span>Total de la venta</span><strong>{guarani(saleCartTotal)}</strong></div>
             </div>}
+            <label>Monto recibido ahora (GS.)<input type="text" inputMode="numeric" value={formatGsInput(salePaymentAmount)} onChange={(event) => setSalePaymentAmount(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 150.000" /><small>Saldo pendiente: {guarani(Math.max(0, saleCartTotal - parseAmount(salePaymentAmount)))}</small></label>
             <label>Forma de pago<select value={saleForm.paymentMethod} onChange={(event) => setSaleForm({ ...saleForm, paymentMethod: event.target.value })}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label>
-            <button type="submit" className="primary-button" disabled={isSavingSale || saleCart.length === 0}>{isSavingSale ? 'Guardando...' : 'Guardar venta'} <span>↗</span></button>
+            <button type="submit" className="primary-button" disabled={isSavingSale || saleCart.length === 0}>{isSavingSale ? 'Guardando...' : 'Guardar venta y recibo'} <span>↗</span></button>
           </form>
         </div>}
+      </section>}
+
+      {view === 'collections' && <section className="workspace">
+        <div className="workspace-heading"><div><p className="eyebrow">CUENTAS POR COBRAR / {filteredOutstandingSales.length} PENDIENTES</p><h2>Saldos pendientes</h2></div><button className="text-button" onClick={() => navigateTo('cash')}>Ir a Caja ↗</button></div>
+        {receiptError && <p className="login-error" role="alert">{receiptError}</p>}
+        {collectionSuccess && <p className="sale-success" role="status">{collectionSuccess}</p>}
+        <div className="history-toolbar"><input className="search-input" value={collectionSearchTerm} onChange={(event) => setCollectionSearchTerm(event.target.value)} placeholder="Buscar por código, nombre o CI" /><span className="history-summary">{filteredOutstandingSales.length} ventas pendientes</span></div>
+        {filteredOutstandingSales.length === 0 ? <div className="empty-state"><span>✓</span><h3>{sales.some((sale) => getSaleBalance(sale) > 0) ? 'No hay coincidencias' : 'No hay saldos pendientes'}</h3><p>{sales.some((sale) => getSaleBalance(sale) > 0) ? 'Prueba buscar por el código del recibo, nombre o CI.' : 'Las ventas con saldo pendiente aparecerán aquí.'}</p></div> : <div className="cash-card full-width"><div className="sales-list">{filteredOutstandingSales.map((sale) => <article className="sale-row outstanding-sale-row" key={sale.id}>
+          <span><strong>{sale.customer}</strong><small>CI {sale.customerDocument || 'N/D'} · Venta {sale.receiptNumber || sale.id} · {getSaleDescription(sale)}</small></span>
+          <span>Pagado: {guarani(getSalePaidAmount(sale))}</span>
+          <strong>Saldo: {guarani(getSaleBalance(sale))}</strong>
+          <button type="button" className="secondary-button compact" onClick={() => openCollectionDialog(sale)}>Registrar abono</button>
+        </article>)}</div></div>}
+        {collectionSale && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="collection-title">
+          <p className="eyebrow">RECIBO {collectionSale.receiptNumber}</p><h2 id="collection-title">Registrar abono</h2>
+          <p><strong>{collectionSale.customer}</strong> · CI {collectionSale.customerDocument || 'N/D'}</p>
+          <div className="collection-summary"><span>Total de la venta<strong>{guarani(collectionSale.totalAmount || collectionSale.unitPrice)}</strong></span><span>Pagado<strong>{guarani(getSalePaidAmount(collectionSale))}</strong></span><span>Saldo pendiente<strong>{guarani(getSaleBalance(collectionSale))}</strong></span></div>
+          <form onSubmit={(event) => void handleCollectionSubmit(event)}>
+            <label>Monto del abono (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(collectionPaymentAmount)} onChange={(event) => setCollectionPaymentAmount(event.target.value.replace(/\D/g, ''))} /><small>Puedes cobrar una parte o el saldo total.</small></label>
+            <label>Forma de pago<select value={collectionPaymentMethod} onChange={(event) => setCollectionPaymentMethod(event.target.value)}>{paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}</select></label>
+            {collectionError && <p className="login-error" role="alert">{collectionError}</p>}
+            <div className="cash-modal-actions"><button type="button" className="secondary-button" onClick={() => setCollectionSale(null)} disabled={isSavingCollection}>Volver</button><button type="submit" className="primary-button" disabled={isSavingCollection}>{isSavingCollection ? 'Guardando...' : 'Guardar abono y recibo'}</button></div>
+          </form>
+        </section></div>}
       </section>}
 
       {view === 'cash' && <section className="workspace">
@@ -1377,7 +1628,7 @@ function App() {
       </section>}
 
       {view === 'history' && <section className="workspace"><div className="workspace-heading"><div><p className="eyebrow">ARCHIVO / {contracts.length} DOCUMENTOS</p><h2>Contratos guardados</h2></div><button className="primary-button compact" onClick={startNew}>＋ Nuevo</button></div><div className="history-toolbar"><input className="search-input" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Buscar por cliente, CI o artículo" /><span className="history-summary">{filteredContracts.length} resultados</span></div>{contracts.length === 0 ? <div className="empty-state"><span>◌</span><h3>Aún no hay contratos</h3><p>Tu archivo aparecerá aquí después de guardar el primero.</p><button className="secondary-button" onClick={startNew}>Crear primer contrato</button></div> : <div className="history-list">{filteredContracts.map((contract, index) => <div className="history-row" key={contract.id}><button type="button" className="history-main" onClick={() => { setForm(contract); navigateTo('review') }}><span className="row-number">{formatContractNumber(contract.contractNumber || index + 1)}</span><span><strong>{contract.tenant}</strong><small>{contract.suit || 'Sin traje'} · {money(contract.totalValue)} · {formatDateTime24(contract.createdAt)}</small></span><span className="row-status">GUARDADO</span><span>↗</span></button><button type="button" className="delete-button" onClick={() => deleteContract(contract.id)}>Eliminar</button></div>)}</div>}{filteredContracts.length === 0 && contracts.length > 0 && <div className="empty-state compact-empty"><span>⌕</span><h3>No hay coincidencias</h3><p>Prueba otra palabra clave o limpia la búsqueda.</p><button className="secondary-button" onClick={() => setSearchTerm('')}>Ver todos</button></div>}</section>}
-      {pdfPreview && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-label="Vista previa del contrato"><section className="pdf-preview-modal"><div className="pdf-preview-bar"><strong>Vista previa del contrato · A4</strong><div className="pdf-preview-actions"><button type="button" className="primary-button" onClick={printPdfPreview} disabled={!pdfPagesReady}>Imprimir A4</button><a className="secondary-button" href={pdfPreview.url} download={pdfPreview.filename}>Descargar PDF</a><a className="secondary-button" href={pdfPreview.url} target="_blank" rel="noopener noreferrer">Abrir PDF</a><button type="button" className="secondary-button" onClick={closePdfPreview}>Cerrar ×</button></div></div><PdfPages key={pdfPreview.url} url={pdfPreview.url} onReady={setPdfPagesReady} /></section></div>}
+      {pdfPreview && <div className="cash-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Vista previa del ${pdfPreview.kind}`}><section className={`pdf-preview-modal pdf-preview-${pdfPreview.kind}`}><div className="pdf-preview-bar"><strong>Vista previa del {pdfPreview.kind} · {pdfPreview.kind === 'recibo' ? '21 × 14 cm' : 'A4'}</strong><div className="pdf-preview-actions"><button type="button" className="primary-button" onClick={printPdfPreview} disabled={!pdfPagesReady}>Imprimir A4</button><a className="secondary-button" href={pdfPreview.url} download={pdfPreview.filename}>Descargar PDF</a><a className="secondary-button" href={pdfPreview.url} target="_blank" rel="noopener noreferrer">Abrir PDF</a><button type="button" className="secondary-button" onClick={closePdfPreview}>Cerrar ×</button></div></div><PdfPages key={pdfPreview.url} url={pdfPreview.url} kind={pdfPreview.kind} onReady={setPdfPagesReady} /></section></div>}
       {isAuthenticated && cashSessionStatus !== 'open' && cashSessionStatus !== 'closed' && <div className="cash-modal-backdrop"><section className="cash-modal" role="dialog" aria-modal="true" aria-labelledby="open-cash-title">
         <p className="eyebrow">NUEVA APERTURA DE CAJA / {dateLabel.toUpperCase()}</p>
         {cashSessionStatus === 'checking' ? <><h2 id="open-cash-title">Consultando caja</h2><p>Verificando la caja abierta en {firebaseEnabled ? 'Firebase' : 'este dispositivo'}...</p></> : cashSessionStatus === 'error' ? <><h2 id="open-cash-title">No se pudo consultar</h2><p>{cashError || 'Verifica tu conexión y los permisos de Firebase.'}</p><div className="cash-modal-actions"><button className="secondary-button" onClick={() => { setCashSessionStatus('checking'); void loadDailyCashSession(cashDateKey).then((session) => { setDailyCashSession(session); setCashSessionStatus(session?.status || 'missing'); setCashError('') }).catch((error) => { setCashSessionStatus('error'); setCashError(error instanceof Error ? error.message : 'No se pudo consultar Firebase.') }) }}>Reintentar</button><button className="text-button" onClick={() => void handleLogout()}>Cerrar sesión</button></div></> : <><h2 id="open-cash-title">Apertura de caja</h2><p>Ingresa el fondo inicial para abrir la caja. La caja permanecerá abierta aunque cambie el día y solo se cerrará cuando la cierres manualmente.</p><form onSubmit={(event) => void handleOpenCash(event)}><label>Monto de apertura (GS.)<input autoFocus required type="text" inputMode="numeric" value={formatGsInput(openingBalanceInput)} onChange={(event) => setOpeningBalanceInput(event.target.value.replace(/\D/g, ''))} placeholder="Ej. 500.000" /></label>{cashError && <p className="login-error" role="alert">{cashError}</p>}<button type="submit" className="primary-button" disabled={isOpeningCash}>{isOpeningCash ? 'Abriendo...' : 'Abrir caja'} <span>↗</span></button></form></>}

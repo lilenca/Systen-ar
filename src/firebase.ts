@@ -2,7 +2,7 @@ import { getApps, initializeApp } from 'firebase/app'
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut as firebaseSignOut, type Unsubscribe } from 'firebase/auth'
 import { collection, doc, getDoc, getDocs, getFirestore, query, runTransaction, setDoc, where, writeBatch } from 'firebase/firestore'
 import { parseAmount } from './money.js'
-import { getSaleDescription, getSaleTotal, type SaleRecord } from './sales.js'
+import { getSaleBalance, getSaleDescription, getSaleTotal, type SalePayment, type SaleRecord } from './sales.js'
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -278,19 +278,38 @@ export async function closeDailyCashSession(
   return session
 }
 
-function saleMovement(sale: Record<string, unknown>) {
-  return {
+function saleMovement(sale: Record<string, unknown>, payment?: SalePayment) {
+  const paid = payment || {
     id: String(sale.id),
+    amount: getSaleTotal(sale as SaleRecord),
+    paymentMethod: typeof sale.paymentMethod === 'string' ? sale.paymentMethod : 'Efectivo',
+    paidAt: typeof sale.soldAt === 'string' ? sale.soldAt : '',
+    cashSessionId: typeof sale.cashSessionId === 'string' ? sale.cashSessionId : '',
+    receiptNumber: typeof sale.receiptNumber === 'string' ? sale.receiptNumber : '',
+    kind: 'legacy' as const,
+  }
+  const kind = paid.kind === 'initial' && paid.amount < getSaleTotal(sale as SaleRecord)
+    ? 'Seña de venta'
+    : paid.kind === 'collection' ? 'Abono de venta' : getSaleDescription(sale as SaleRecord)
+  return {
+    id: paid.id || String(sale.id),
     type: 'venta',
-    cashSessionId: sale.cashSessionId || '',
+    cashSessionId: paid.cashSessionId || sale.cashSessionId || '',
     customer: sale.customer || 'Venta directa',
     customerDocument: sale.customerDocument || '',
-    reference: sale.receiptNumber || `REC-${String(sale.id).slice(0, 8).toUpperCase()}`,
-    paymentMethod: sale.paymentMethod || 'Efectivo',
-    amount: getSaleTotal(sale as SaleRecord),
-    concept: getSaleDescription(sale as SaleRecord),
-    paidAt: sale.soldAt,
+    reference: paid.receiptNumber || sale.receiptNumber || `REC-${String(sale.id).slice(0, 8).toUpperCase()}`,
+    paymentMethod: paid.paymentMethod || 'Efectivo',
+    amount: Number(paid.amount || 0),
+    concept: kind,
+    paidAt: paid.paidAt || sale.soldAt || '',
   }
+}
+
+function saleMovements(sale: Record<string, unknown>) {
+  if (!Array.isArray(sale.payments)) return [saleMovement(sale)]
+  return sale.payments
+    .map((payment) => saleMovement(sale, payment as SalePayment))
+    .filter((movement) => movement.amount > 0)
 }
 
 function depositMovement(contract: Record<string, unknown>) {
@@ -357,10 +376,11 @@ export async function loadBusinessData(
   const cashMovements = cashSnapshot.docs.map((snapshot) => ({ ...snapshot.data(), id: snapshot.id }))
   const movementIds = new Set(cashMovements.map((movement) => String(movement.id)))
   for (const sale of sales) {
-    const movement = saleMovement(sale)
-    if (!movementIds.has(movement.id)) {
-      cashMovements.push(movement)
-      documentsToSave.push({ collectionName: 'caja', id: movement.id, data: movement })
+    for (const movement of saleMovements(sale)) {
+      if (!movementIds.has(movement.id)) {
+        cashMovements.push(movement)
+        documentsToSave.push({ collectionName: 'caja', id: movement.id, data: movement })
+      }
     }
   }
   for (const contract of contracts) {
@@ -469,11 +489,18 @@ export async function saveContractToFirestore(contract: Record<string, unknown>)
 
 export async function saveSaleToFirestore(
   sale: Record<string, unknown>,
+  initialPayment: SalePayment,
 ) {
   if (!firestore) throw new Error('Firebase no está configurado.')
+  if (!initialPayment.id) throw new Error('No se pudo identificar el pago inicial.')
+
+  const totalAmount = getSaleTotal(sale as SaleRecord)
+  if (initialPayment.amount < 0 || initialPayment.amount > totalAmount) {
+    throw new Error('El monto recibido no puede superar el total de la venta.')
+  }
 
   const saleRef = doc(firestore, 'ventas', String(sale.id))
-  const cashRef = doc(firestore, 'caja', String(sale.id))
+  const cashRef = doc(firestore, 'caja', String(initialPayment.id))
   const receiptCounterRef = doc(firestore, 'configuracion', 'recibos')
   const customerDocument = typeof sale.customerDocument === 'string' ? sale.customerDocument.trim() : ''
   const customerRef = customerDocument ? doc(firestore, 'clientes', customerDocument) : null
@@ -484,14 +511,17 @@ export async function saveSaleToFirestore(
       customerRef ? transaction.get(customerRef) : Promise.resolve(null),
     ])
     const nextReceiptNumber = Number(receiptCounterSnapshot.data()?.nextNumber || 1)
+    const receiptNumber = `REC-${String(nextReceiptNumber).padStart(7, '0')}`
+    const savedPayment: SalePayment = { ...initialPayment, receiptNumber, kind: 'initial' }
     const savedSale = {
       ...sale,
       customer: typeof sale.customer === 'string' ? sale.customer.trim().toLocaleUpperCase('es') : '',
-      receiptNumber: `REC-${String(nextReceiptNumber).padStart(7, '0')}`,
+      receiptNumber,
+      payments: [savedPayment],
     }
     transaction.set(receiptCounterRef, { nextNumber: nextReceiptNumber + 1 }, { merge: true })
     transaction.set(saleRef, savedSale)
-    transaction.set(cashRef, saleMovement(savedSale))
+    if (savedPayment.amount > 0) transaction.set(cashRef, saleMovement(savedSale, savedPayment))
     if (customerRef && customerDocument) {
       const existingCustomer = customerSnapshot?.data()
       const customerName = typeof sale.customer === 'string' && sale.customer.trim()
@@ -511,6 +541,46 @@ export async function saveSaleToFirestore(
         updatedAt: new Date().toISOString(),
       }, { merge: true })
     }
-    return { sale: savedSale }
+    return { sale: savedSale, payment: savedPayment }
+  })
+}
+
+export async function recordSalePaymentToFirestore(saleId: string, payment: SalePayment) {
+  if (!firestore) throw new Error('Firebase no está configurado.')
+  if (!payment.id) throw new Error('No se pudo identificar el abono.')
+  if (payment.amount <= 0) throw new Error('El monto del abono debe ser mayor que cero.')
+
+  const saleRef = doc(firestore, 'ventas', saleId)
+  const receiptCounterRef = doc(firestore, 'configuracion', 'recibos')
+  const cashRef = doc(firestore, 'caja', String(payment.id))
+
+  return runTransaction(firestore, async (transaction) => {
+    const [saleSnapshot, receiptCounterSnapshot] = await Promise.all([
+      transaction.get(saleRef),
+      transaction.get(receiptCounterRef),
+    ])
+    if (!saleSnapshot.exists()) throw new Error('No se encontró la venta pendiente.')
+
+    const currentSale: Record<string, unknown> = { ...saleSnapshot.data(), id: saleSnapshot.id }
+    const remainingBalance = getSaleBalance(currentSale as SaleRecord)
+    if (remainingBalance <= 0) throw new Error('Esta venta ya está totalmente pagada.')
+    if (payment.amount > remainingBalance) throw new Error('El abono supera el saldo pendiente de la venta.')
+
+    const nextReceiptNumber = Number(receiptCounterSnapshot.data()?.nextNumber || 1)
+    const savedPayment: SalePayment = {
+      ...payment,
+      receiptNumber: `REC-${String(nextReceiptNumber).padStart(7, '0')}`,
+      kind: 'collection',
+    }
+    const currentPayments = Array.isArray(currentSale.payments) ? currentSale.payments as SalePayment[] : []
+    const updatedSale = {
+      ...currentSale,
+      payments: [...currentPayments, savedPayment],
+    }
+
+    transaction.set(receiptCounterRef, { nextNumber: nextReceiptNumber + 1 }, { merge: true })
+    transaction.set(saleRef, updatedSale)
+    transaction.set(cashRef, saleMovement(updatedSale, savedPayment))
+    return { sale: updatedSale, payment: savedPayment }
   })
 }

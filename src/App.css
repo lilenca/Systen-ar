@@ -327,6 +327,8 @@ textarea { min-height: 110px; resize: vertical; }
   .app-shell .topbar .status { display: flex; flex: 1 1 100%; order: -1; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px; margin: 0; padding-bottom: 7px; border-bottom: 1px solid rgba(220, 190, 145, .28); font-size: 8px; }
   .app-shell .topbar .status-dot { margin-right: 2px; }
   .app-shell .topbar .status-mode, .app-shell .topbar .status-detail { font-size: 8px; }
+  .app-shell .topbar-actions > .header-nav-button { min-height: 34px; padding-inline: 9px; font-size: 10px; }
+  .app-shell .topbar-actions > .logout-button { min-height: 34px; padding: 7px 9px; font-size: 10px; white-space: nowrap; }
 }
 .login-screen { grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 440px); gap: clamp(28px, 7vw, 90px); background: linear-gradient(135deg, #243028 0%, #405447 55%, #c5d94b 160%); }.login-visual { display: grid; gap: 14px; width: min(100%, 420px); color: #f4f5f1; }.login-visual img { width: 190px; filter: hue-rotate(55deg) saturate(0.65) brightness(1.35); }.login-visual strong { font-size: clamp(34px, 5vw, 62px); line-height: .86; letter-spacing: -.06em; }.login-visual span { font: 10px 'DM Mono', monospace; letter-spacing: .12em; color: #dce8a0; }
 .contract-preview { width: min(100%, 794px); min-height: 1123px; max-width: 794px; }
@@ -347,6 +349,11 @@ textarea { min-height: 110px; resize: vertical; }
 .sale-row > span:first-child { display: grid; gap: 5px; }
 .sale-row small { color: #cbbba5; font: 12px/1.4 'Space Grotesk', sans-serif; letter-spacing: 0; text-transform: none; }
 .sale-row > strong { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.outstanding-sale-row { grid-template-columns: minmax(0, 2fr) minmax(120px, .8fr) minmax(140px, auto) auto; align-items: center; }
+.outstanding-sale-row > strong { color: #f0d09a; }
+.collection-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.collection-summary span { display: grid; gap: 8px; min-width: 0; padding: 12px; border: 1px solid rgba(220, 190, 145, .28); color: #cbbba5; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
+.collection-summary strong { color: #f4e8d2; font: 600 13px 'Space Grotesk', sans-serif; overflow-wrap: anywhere; }
 .reconciliation-row > span:nth-child(2) { min-width: 0; }
 .reconciliation-row > small:last-child { white-space: nowrap; text-align: right; }
 .withdrawal-row { grid-template-columns: minmax(0, 1fr) auto auto; }
@@ -359,6 +366,12 @@ textarea { min-height: 110px; resize: vertical; }
   .reconciliation-row > span:nth-child(2), .withdrawal-row > span:nth-child(2) { grid-column: 1; grid-row: 2; }
   .reconciliation-row > strong, .withdrawal-row > strong { grid-column: 2; grid-row: 2; }
   .reconciliation-row > small:last-child { grid-column: 1 / -1; grid-row: 3; text-align: left; }
+  .outstanding-sale-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .outstanding-sale-row > span:first-child { grid-column: 1 / -1; }
+  .outstanding-sale-row > span:nth-child(2) { grid-column: 1; }
+  .outstanding-sale-row > strong { grid-column: 2; grid-row: 2; }
+  .outstanding-sale-row > button { grid-column: 1 / -1; }
+  .collection-summary { grid-template-columns: 1fr; }
 }
 .cash-session-status { margin: -22px 0 0; color: #d6ad68; font: 10px 'DM Mono', monospace; }
 .cash-heading-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -377,7 +390,7 @@ textarea { min-height: 110px; resize: vertical; }
 .cash-close-summary span { display: grid; gap: 8px; padding: 12px; border: 1px solid rgba(220, 190, 145, .3); color: #cbbba5; font: 10px 'DM Mono', monospace; text-transform: uppercase; }
 .cash-close-summary strong { color: #f4e8d2; font: 600 14px 'Space Grotesk', sans-serif; overflow-wrap: anywhere; }
 .cash-difference strong { color: #d6ad68; }
-.header-nav-button { min-height: 38px; padding: 0 12px; border: 1px solid rgba(220, 190, 145, .4); background: transparent; color: #f4e8d2; font-size: 12px; }
+.header-nav-button { min-height: 38px; padding: 0 12px; border: 1px solid rgba(220, 190, 145, .4); background: transparent; color: #f4e8d2; font-size: 12px; white-space: nowrap; }
 .header-nav-button:hover { background: rgba(244, 232, 210, .1); }
 .client-list { border-top: 1px solid rgba(220, 190, 145, .32); }
 .client-row { display: grid; grid-template-columns: 34px minmax(160px, 1.2fr) minmax(120px, .8fr) minmax(180px, 1.4fr) auto; align-items: center; gap: 14px; min-height: 72px; border-bottom: 1px solid rgba(220, 190, 145, .24); }

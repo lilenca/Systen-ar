@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCashCloseSummary, buildCashReconciliation, buildSalesSummary, defaultProducts, getLocalDateKey, getSaleDescription, getSaleItemCount, getSaleTotal } from './sales.js';
+import { buildCashCloseSummary, buildCashReconciliation, buildSalesSummary, defaultProducts, getLocalDateKey, getSaleBalance, getSaleDescription, getSaleItemCount, getSalePaidAmount, getSaleTotal } from './sales.js';
 
 test('sale products include the requested items without stock tracking', () => {
+  assert.equal(defaultProducts.find((product) => product.id === 'tintoreria')?.name, 'Tintorería');
   assert.deepEqual(defaultProducts.filter((product) => ['corbata', 'chaleco', 'pantalon-solo'].includes(product.id)).map((product) => product.name), [
     'Corbata',
     'Chaleco',
@@ -134,4 +135,54 @@ test('a multi-item sale totals every product as one cash movement', () => {
   assert.equal(reconciliation.entries.length, 1);
   assert.equal(reconciliation.entries[0].amount, 330000);
   assert.equal(reconciliation.totalsByMethod.Efectivo, 330000);
+});
+
+test('a sale deposit and its later balance are separate cash movements', () => {
+  const sale = {
+    id: 'installment-sale',
+    receiptNumber: 'REC-0000010',
+    customer: 'ANA PÉREZ',
+    customerDocument: '1234567',
+    totalAmount: 350000,
+    soldAt: '2026-09-29T09:00:00.000Z',
+    payments: [
+      { id: 'deposit', amount: 150000, paymentMethod: 'Efectivo', paidAt: '2026-09-29T09:00:00.000Z', cashSessionId: 'session-1', receiptNumber: 'REC-0000010', kind: 'initial' },
+      { id: 'balance', amount: 200000, paymentMethod: 'Transferencia', paidAt: '2026-09-30T12:00:00.000Z', cashSessionId: 'session-2', receiptNumber: 'REC-0000011', kind: 'collection' },
+    ],
+  };
+
+  assert.equal(getSalePaidAmount(sale), 350000);
+  assert.equal(getSaleBalance(sale), 0);
+  assert.equal(getSaleBalance({ ...sale, payments: sale.payments.slice(0, 1) }), 200000);
+
+  const firstDay = buildCashReconciliation([sale], [], '2026-09-29', 'session-1');
+  assert.equal(firstDay.totalAmount, 150000);
+  assert.equal(firstDay.entries[0].movementType, 'SEÑA');
+  assert.equal(firstDay.totalsByMethod.Efectivo, 150000);
+
+  const secondDay = buildCashReconciliation([sale], [], '2026-09-30', 'session-2');
+  assert.equal(secondDay.totalAmount, 200000);
+  assert.equal(secondDay.entries[0].movementType, 'CANCELACIÓN');
+  assert.equal(secondDay.totalsByMethod.Transferencia, 200000);
+});
+
+test('sales without payment history remain fully paid for backward compatibility', () => {
+  const legacySale = { id: 'legacy-sale', quantity: 1, unitPrice: 350000, soldAt: '2026-09-29T09:00:00.000Z' };
+  assert.equal(getSalePaidAmount(legacySale), 350000);
+  assert.equal(getSaleBalance(legacySale), 0);
+  assert.equal(buildCashReconciliation([legacySale], [], '2026-09-29').totalAmount, 350000);
+});
+
+test('a sale with zero received stays fully pending and does not create cash income', () => {
+  const unpaidSale = {
+    id: 'unpaid-sale',
+    totalAmount: 350000,
+    soldAt: '2026-09-29T09:00:00.000Z',
+    payments: [
+      { id: 'zero-payment', amount: 0, paymentMethod: 'Efectivo', paidAt: '2026-09-29T09:00:00.000Z', kind: 'initial' },
+    ],
+  };
+  assert.equal(getSalePaidAmount(unpaidSale), 0);
+  assert.equal(getSaleBalance(unpaidSale), 350000);
+  assert.equal(buildCashReconciliation([unpaidSale], [], '2026-09-29').totalAmount, 0);
 });

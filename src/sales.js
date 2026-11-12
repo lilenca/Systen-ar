@@ -10,6 +10,7 @@ export const defaultProducts = [
   { id: 'corbata', name: 'Corbata', price: 50000 },
   { id: 'chaleco', name: 'Chaleco', price: 120000 },
   { id: 'pantalon-solo', name: 'Pantalón solo', price: 180000 },
+  { id: 'tintoreria', name: 'Tintorería', price: 0 },
   { id: 'compostura', name: 'Compostura', price: 0 },
   { id: 'confeccion-a-medida', name: 'Confección a medida', price: 0 },
   { id: 'tirantes', name: 'Tirantes', price: 0 },
@@ -61,6 +62,28 @@ export function getSaleDescription(sale = {}) {
   return sale.productName || 'Venta';
 }
 
+export function getSalePayments(sale = {}) {
+  if (Array.isArray(sale.payments)) return sale.payments;
+  if (!sale.soldAt) return [];
+  return [{
+    id: sale.id,
+    amount: getSaleTotal(sale),
+    paymentMethod: sale.paymentMethod,
+    paidAt: sale.soldAt,
+    cashSessionId: sale.cashSessionId,
+    receiptNumber: sale.receiptNumber,
+    kind: 'legacy',
+  }];
+}
+
+export function getSalePaidAmount(sale = {}) {
+  return getSalePayments(sale).reduce((total, payment) => total + Number(payment.amount || 0), 0);
+}
+
+export function getSaleBalance(sale = {}) {
+  return Math.max(0, getSaleTotal(sale) - getSalePaidAmount(sale));
+}
+
 export function buildSalesSummary(sales = [], dateKey = getLocalDateKey(), cashSessionId, sessionNumber = 1) {
   const todaySales = sales.filter((sale) => {
     if (!sale.soldAt) return false;
@@ -85,18 +108,33 @@ export function buildCashReconciliation(sales = [], contracts = [], dateKey = ge
   };
   const entries = [
     ...sales
-      .filter((sale) => sale.soldAt && belongsToCurrentCash(sale))
-      .map((sale) => ({
-        id: sale.id,
-        movementType: 'VENTA',
-        customer: sale.customer || 'Venta directa',
-        customerDocument: sale.customerDocument || '',
-        reference: sale.receiptNumber || `REC-${String(sale.id || '').slice(0, 8).toUpperCase()}`,
-        paymentMethod: paymentMethods.includes(sale.paymentMethod) ? sale.paymentMethod : 'Efectivo',
-        amount: getSaleTotal(sale),
-        concept: getSaleDescription(sale),
-        paidAt: sale.soldAt,
-      })),
+      .flatMap((sale) => {
+        const payments = [...getSalePayments(sale)].sort((first, second) => (first.paidAt || '').localeCompare(second.paidAt || ''))
+        let cumulativePaid = 0
+        return payments.flatMap((payment) => {
+          cumulativePaid += Number(payment.amount || 0)
+          const balanceAfterPayment = Math.max(0, getSaleTotal(sale) - cumulativePaid)
+          if (Number(payment.amount || 0) <= 0 || !payment.paidAt || !belongsToCurrentCash({
+            ...payment,
+            soldAt: payment.paidAt,
+            cashSessionId: payment.cashSessionId || sale.cashSessionId,
+          })) return []
+          const kind = payment.kind === 'legacy' || (payment.kind === 'initial' && balanceAfterPayment === 0)
+            ? 'VENTA'
+            : payment.kind === 'initial' ? 'SEÑA' : balanceAfterPayment === 0 ? 'CANCELACIÓN' : 'ABONO'
+          return [{
+              id: payment.id || sale.id,
+              movementType: kind,
+              customer: sale.customer || 'Venta directa',
+              customerDocument: sale.customerDocument || '',
+              reference: payment.receiptNumber || sale.receiptNumber || `REC-${String(sale.id || '').slice(0, 8).toUpperCase()}`,
+              paymentMethod: paymentMethods.includes(payment.paymentMethod) ? payment.paymentMethod : 'Efectivo',
+              amount: Number(payment.amount || 0),
+              concept: payment.kind === 'initial' && balanceAfterPayment > 0 ? 'Seña de venta' : payment.kind === 'collection' ? 'Abono de venta' : getSaleDescription(sale),
+              paidAt: payment.paidAt,
+            }]
+        })
+      }),
     ...contracts
       .filter((contract) => contract.createdAt && belongsToCurrentCash(contract) && parseAmount(contract.depositValue) > 0)
       .map((contract) => ({

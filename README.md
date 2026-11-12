@@ -8,7 +8,9 @@ Los nombres de clientes se escriben y se guardan en mayúsculas en contratos, ve
 
 Al registrar un contrato, la seña abonada es obligatoria; si no hubo seña se debe ingresar `0`.
 
-El PDF incluye el membrete sin fondo en la esquina superior derecha del contrato y en la copia del cliente. La vista previa se muestra en la aplicación; desde ella puedes imprimir, abrir o descargar el PDF.
+Las ventas aceptan pagos parciales. El recibo registra el importe recibido y el saldo pendiente; cada abono posterior queda asociado a la misma venta, genera un recibo propio y se contabiliza en caja solo en la fecha y caja en que se cobra. Los recibos llevan el mismo membrete y teléfono de contacto que el contrato, y usan un formato compacto de 21 × 14 cm para imprimir en media hoja A4. Los saldos se pueden buscar por código de recibo, nombre o CI desde **Saldos pendientes**. Las ventas antiguas, sin historial de pagos, se mantienen como ventas totalmente pagadas.
+
+El PDF incluye el membrete sin fondo en la esquina superior derecha del contrato y en la copia del cliente. Tanto los contratos como los recibos se abren en una vista previa en la aplicación; desde allí puedes imprimir, abrir o descargar el PDF. Al imprimir un recibo, selecciona papel A4 y tamaño real para conservar sus dimensiones de 21 × 14 cm.
 
 ## Requisitos de despliegue
 

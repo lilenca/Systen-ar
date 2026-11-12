@@ -24,10 +24,27 @@ export type SaleRecord = {
   unitPrice?: number
   totalAmount?: number
   items?: SaleLineItem[]
+  soldAt?: string
+  cashSessionId?: string
+  receiptNumber?: string
+  paymentMethod?: string
+  payments?: SalePayment[]
+}
+export type SalePayment = {
+  id?: string
+  amount: number
+  paymentMethod?: string
+  paidAt?: string
+  cashSessionId?: string
+  receiptNumber?: string
+  kind?: 'initial' | 'collection' | 'legacy'
 }
 export function getSaleTotal(sale: SaleRecord): number
 export function getSaleItemCount(sale: SaleRecord): number
 export function getSaleDescription(sale: SaleRecord): string
+export function getSalePayments(sale: SaleRecord): SalePayment[]
+export function getSalePaidAmount(sale: SaleRecord): number
+export function getSaleBalance(sale: SaleRecord): number
 export function buildCashCloseSummary(openingBalance: number, cashIncome: number, countedCash: number, cashWithdrawals?: number): {
   expectedCash: number
   countedCash: number
@@ -55,6 +72,7 @@ export function buildCashReconciliation(
     customerDocument?: string
     receiptNumber?: string
     paymentMethod?: string
+    payments?: SalePayment[]
     unitPrice?: number
     quantity?: number
     productName?: string
@@ -78,7 +96,7 @@ export function buildCashReconciliation(
 ): {
   entries: Array<{
     id: string
-    movementType: 'VENTA' | 'ALQUILER'
+    movementType: 'VENTA' | 'SEÑA' | 'ABONO' | 'CANCELACIÓN' | 'ALQUILER'
     customer: string
     customerDocument: string
     reference: string
